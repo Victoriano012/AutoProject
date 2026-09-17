@@ -406,7 +406,8 @@ async function runTicketOnce(dir: string, ticketId: string): Promise<void> {
  * resumes the same session with the indication. Every other card already
  * carries the indication in its description, written by the board before this
  * call, so its run reads it whenever it does start — which is why nothing here
- * has to be kept for it, and why a server restart cannot lose it.
+ * has to be kept for it, and why a server restart cannot lose it. The board
+ * shows the indication itself; no line about when it will be read is added.
  */
 export function noteTicket(dir: string, ticketId: string, message: string): void {
   const text = message.trim();
@@ -416,31 +417,13 @@ export function noteTicket(dir: string, ticketId: string, message: string): void
 
   store.appendLog(dir, ticketId, { kind: "user", text, ts: Date.now() });
 
+  if (ticket.status !== "running") return;
   const key = ticketKey(dir, ticketId);
-  if (ticket.status === "running") {
-    registry.notes.set(key, [...(registry.notes.get(key) ?? []), text]);
-    // The interrupt is what makes it live; the run loop does the rest. A ticket
-    // marked running with no session left to interrupt (a restart settles those)
-    // still has the indication in its description.
-    registry.controllers.get(key)?.abort();
-    return;
-  }
-
-  // Not running: say when the agent will read it, in the scheduler's own words.
-  const why = notReadyReason(project.tickets, ticket, schedulerFacts(dir));
-  const waiting = why?.startsWith("waiting") ? ` (${why})` : "";
-  store.appendLog(dir, ticketId, {
-    kind: "info",
-    text:
-      ticket.status === "error"
-        ? "Noted — the agent gets this when you retry the card."
-        : // The card finished between the person pressing send and this: their
-          // ✕ is what puts its agent back to work now.
-          ticket.status === "review"
-          ? "Noted — the card just reached review; the agent gets this if you send it back."
-          : `Noted — the agent gets this when the card starts${waiting}.`,
-    ts: Date.now(),
-  });
+  registry.notes.set(key, [...(registry.notes.get(key) ?? []), text]);
+  // The interrupt is what makes it live; the run loop does the rest. A ticket
+  // marked running with no session left to interrupt (a restart settles those)
+  // still has the indication in its description.
+  registry.controllers.get(key)?.abort();
 }
 
 /** The session a ticket's feedback resumes: its worker's — one conversation
