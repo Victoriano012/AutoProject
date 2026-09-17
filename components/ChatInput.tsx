@@ -22,8 +22,10 @@ export default function ChatInput({
   disabled?: boolean;
   placeholder?: string;
   sendTitle?: string;
-  /** Arrow up on the first line / down on the last: the caller walks its
-   * history (a shell's recall). Inside a longer text the arrows move as usual. */
+  /** Arrow up from the very start / down from the very end: the caller walks
+   * its history (a shell's recall). Anywhere else the arrows move as usual, so
+   * on the first or last line they first reach the text's edge, and only the
+   * next press goes on to the neighbouring prompt. */
   onHistory?: (dir: "back" | "forward") => void;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -54,12 +56,13 @@ export default function ChatInput({
           } else if (onHistory && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
             const el = e.currentTarget;
             const edge =
-              e.key === "ArrowUp"
-                ? !el.value.slice(0, el.selectionStart).includes("\n")
-                : !el.value.slice(el.selectionEnd).includes("\n");
+              e.key === "ArrowUp" ? el.selectionStart === 0 : el.selectionEnd === el.value.length;
             if (!edge) return;
             e.preventDefault();
             onHistory(e.key === "ArrowUp" ? "back" : "forward");
+            // The recalled prompt is edited from its end, as in a shell; the
+            // value lands on the next render, hence the frame's wait.
+            requestAnimationFrame(() => el.setSelectionRange(el.value.length, el.value.length));
           }
         }}
       />
