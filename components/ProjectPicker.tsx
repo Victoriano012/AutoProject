@@ -108,9 +108,11 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
           ) : (
             Array.from({ length: FADE_STEPS }, (_, i) => i + 1).map((k) => {
               const period = 100 / 6;
-              // A cosine fade, not a linear one: the colour barely changes at
-              // either end, so no step there is wide enough to show as a tick.
-              const dash = (period * Math.acos((2 * k) / FADE_STEPS - 1)) / Math.PI;
+              // Half of each period stays solid blue, the primary colour; the
+              // other half dips to pale and back on a cosine, whose colour
+              // barely changes at either end, so no step there is wide enough
+              // to show as a tick.
+              const dash = period - (period / 2) * (Math.acos(1 - (2 * k) / FADE_STEPS) / Math.PI);
               return (
                 <rect
                   key={k}
