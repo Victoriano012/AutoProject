@@ -1,7 +1,14 @@
 "use client";
 
 import { useState, useSyncExternalStore } from "react";
-import { isProjectRunning, runProject, stopProject, subscribeRuns } from "@/lib/runner";
+import {
+  agentBusy,
+  isProjectRunning,
+  runProject,
+  stopAgent,
+  stopProject,
+  subscribeRuns,
+} from "@/lib/runner";
 import { useStore } from "@/lib/store";
 import GearIcon from "./GearIcon";
 import { BoardIcon, ChatIcon, PlayIcon, Spinner, StopIcon } from "./icons";
@@ -19,7 +26,12 @@ export default function Toolbar() {
 
   // Pushed by the runner the moment the run starts or settles — a poll would
   // both lag and keep saying "running" for a run with nothing left to do.
-  const running = useSyncExternalStore(subscribeRuns, isProjectRunning, () => false);
+  const runGoing = useSyncExternalStore(subscribeRuns, isProjectRunning, () => false);
+  // The project agent mid-turn is the project working too, and this corner is
+  // where a person looks to see whether anything is — so it shows both, and its
+  // stop halts whatever is going.
+  const agentGoing = useSyncExternalStore(subscribeRuns, agentBusy, () => false);
+  const running = runGoing || agentGoing;
 
   return (
     <header className="h-16 shrink-0 flex items-center gap-3 px-4 bg-white border-b border-zinc-200">
@@ -43,8 +55,11 @@ export default function Toolbar() {
         {running ? (
           <button
             className="rounded-lg px-2 py-1.5 text-red-600 hover:bg-zinc-200 hover:text-red-500"
-            onClick={() => stopProject()}
-            title="Stop the run"
+            onClick={() => {
+              if (runGoing) stopProject();
+              if (agentGoing) stopAgent();
+            }}
+            title={runGoing ? "Stop the run" : "Stop the agent"}
           >
             <StopIcon />
           </button>
