@@ -1,89 +1,52 @@
 import * as runs from "@/lib/server/runs";
+import * as store from "@/lib/server/project-store";
+import { runRequestSchema } from "@/lib/server/command-schemas";
+export type { RunRequest } from "@/lib/server/command-schemas";
 
 export const dynamic = "force-dynamic";
 
-/**
- * Every run action, executed in the server process. The work is deliberately
- * not tied to `req.signal`: a run keeps going (and keeps writing its progress)
- * when the browser tab that started it reloads or closes. The response, when
- * anyone is still listening, arrives once the action settles.
- */
-export interface RunRequest {
-  dir: string;
-  action:
-    | "runTicket"
-    | "runProject"
-    | "stopTicket"
-    | "stopProject"
-    | "sendFeedback"
-    | "noteTicket"
-    | "approveTicket"
-    | "rejectTicket"
-    | "settleZombies"
-    | "removeTickets";
-  ticketId?: string;
-  /** removeTickets */
-  ticketIds?: string[];
-  message?: string;
-}
-
+/** Commands acknowledge admission; long-running work reports through SSE and
+ * belongs to the server, independent of the requesting tab's lifetime. */
 export async function POST(req: Request) {
-  const body = (await req.json()) as RunRequest;
+  const parsed = runRequestSchema.safeParse(await req.json().catch(() => null));
+  if (!parsed.success) return Response.json({ error: "Invalid run command", details: parsed.error.issues }, { status: 400 });
+  const body = parsed.data;
   const { dir, action } = body;
-  const id = body.ticketId ?? "";
-  if (!dir || !runs.ensureLoaded(dir)) {
-    return Response.json({ error: "Unknown project" }, { status: 404 });
+  if (!runs.ensureLoaded(dir)) return Response.json({ error: "Unknown project" }, { status: 404 });
+  if (runs.registry.removing.has(dir)) return Response.json({ error: "Project is being removed" }, { status: 409 });
+  const id = "ticketId" in body ? body.ticketId : "";
+  if (id && !store.getProject(dir)?.tickets.some((ticket) => ticket.id === id)) {
+    return Response.json({ error: "Unknown ticket" }, { status: 404 });
   }
-
+  let background: Promise<void> | undefined;
   try {
     switch (action) {
-      case "runTicket":
-        await runs.runTicket(dir, id);
-        break;
-      case "runProject":
-        await runs.runProject(dir);
-        break;
-      case "sendFeedback":
-        await runs.sendFeedback(dir, id, body.message ?? "");
-        break;
-      case "noteTicket":
-        runs.noteTicket(dir, id, body.message ?? "");
-        break;
-      case "rejectTicket":
-        await runs.rejectTicket(dir, id, body.message ?? "");
-        break;
-      case "approveTicket":
-        runs.approveTicket(dir, id);
-        break;
-      case "stopTicket":
-        runs.stopTicket(dir, id);
-        break;
-      case "stopProject":
-        runs.stopProject(dir, true);
-        break;
-      case "settleZombies":
-        runs.settleZombies(dir);
-        break;
-      case "removeTickets":
-        runs.removeTickets(dir, body.ticketIds ?? []);
-        break;
-      default:
-        return Response.json({ error: `Unknown action: ${action}` }, { status: 400 });
+      case "runTicket": background = runs.runTicket(dir, id); break;
+      case "runProject": background = runs.runProject(dir); break;
+      case "sendFeedback": background = runs.sendFeedback(dir, id, body.message); break;
+      case "rejectTicket": background = runs.rejectTicket(dir, id, body.message); break;
+      case "noteTicket": runs.noteTicket(dir, id, body.message); break;
+      case "approveTicket": runs.approveTicket(dir, id); break;
+      case "stopTicket": runs.stopTicket(dir, id); break;
+      case "stopProject": runs.stopProject(dir, true); break;
+      case "settleZombies": runs.settleZombies(dir); break;
+      case "removeTickets": runs.removeTickets(dir, body.ticketIds); break;
     }
-  } catch (err) {
-    return Response.json(
-      { error: err instanceof Error ? err.message : String(err), runs: runs.runState(dir) },
-      { status: 500 }
-    );
+    if (background) void background.catch((error) => {
+      const entry = { kind: "error" as const, text: String(error), ts: Date.now() };
+      if (id) store.appendLog(dir, id, entry);
+      else store.appendChat(dir, [{ ...entry, mode: "panel" }]);
+      runs.notifyRuns(dir);
+    });
+    await store.flush(dir);
+  } catch (error) {
+    return Response.json({ error: String(error), dir, runs: runs.runState(dir) }, { status: 500 });
   }
-  return Response.json({ ok: true, runs: runs.runState(dir) });
+  return Response.json({ ok: true, dir, runs: runs.runState(dir) }, { status: background ? 202 : 200 });
 }
 
-/** Which runs are actually live right now — the truth a reloaded tab needs. */
 export async function GET(req: Request) {
   const dir = new URL(req.url).searchParams.get("dir") ?? "";
-  if (!dir || !runs.ensureLoaded(dir)) {
-    return Response.json({ error: "Unknown project" }, { status: 404 });
-  }
-  return Response.json({ runs: runs.runState(dir) });
+  if (!dir || !runs.ensureLoaded(dir)) return Response.json({ error: "Unknown project" }, { status: 404 });
+  return Response.json({ dir, runs: runs.runState(dir) });
 }

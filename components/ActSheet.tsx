@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } fr
 import { agentBusy, agentRequests, subscribeRuns } from "@/lib/runner";
 import { useStore } from "@/lib/store";
 import type { AgentRequest } from "@/lib/types";
+import TranscriptDownload from "./TranscriptDownload";
 
 /**
  * The project agent's conversation, slid up over the board when the person
@@ -83,14 +84,28 @@ function Transcript() {
   const requests = useSyncExternalStore(subscribeRuns, agentRequests, () => NONE);
   const waiting = requests.filter((r) => r.mode === "act" && r.state === "queued");
   const listRef = useRef<HTMLDivElement>(null);
+  const pinned = useRef(true);
+  const [pageEnd, setPageEnd] = useState<number | null>(null);
+  const end = Math.min(pageEnd ?? chat.length, chat.length);
+  const start = Math.max(0, end - 200);
 
   useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [chat.length, waiting.length, busy]);
+    if (pinned.current) listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+  }, [chat, waiting.length, busy, pageEnd]);
 
   return (
-    <div ref={listRef} className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
-      {chat.map((m, i) => {
+    <div ref={listRef} className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2" onScroll={() => {
+      const el = listRef.current;
+      if (el) pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    }}>
+      <TranscriptDownload />
+      {start > 0 && <button className="text-sm text-violet-600" onClick={() => {
+        pinned.current = false;
+        setPageEnd(Math.max(200, start));
+        if (listRef.current) listRef.current.scrollTop = 0;
+      }}>Show earlier messages ({start} older)</button>}
+      {chat.slice(start, end).map((m, index) => {
+        const i = start + index;
         switch (m.kind) {
           case "user":
             // The two modes do different things with what was sent, so each
@@ -133,6 +148,16 @@ function Transcript() {
             );
         }
       })}
+      {end < chat.length && <button className="text-sm text-violet-600" onClick={() => {
+        const next = Math.min(chat.length, end + 200);
+        pinned.current = next === chat.length;
+        setPageEnd(next === chat.length ? null : next);
+        if (listRef.current) listRef.current.scrollTop = 0;
+      }}>Show newer messages ({chat.length - end} newer)</button>}
+      {pageEnd !== null && <button className="ml-2 text-sm text-violet-600" onClick={() => {
+        pinned.current = true;
+        setPageEnd(null);
+      }}>Jump to latest</button>}
       {waiting.map((r) => (
         <p
           key={r.id}

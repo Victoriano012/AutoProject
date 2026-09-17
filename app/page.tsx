@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import ActSheet from "@/components/ActSheet";
 import BoardView from "@/components/BoardView";
 import BottomBar from "@/components/BottomBar";
@@ -24,6 +24,7 @@ export default function Home() {
   );
   const projectId = useStore((s) => s.projectId);
   const projectLoaded = useStore((s) => s.projectLoaded);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const mode = useStore((s) => s.mode);
   const mainRef = useRef<HTMLElement>(null);
   useSwipeNav(mainRef);
@@ -34,7 +35,7 @@ export default function Home() {
 
   // Re-fetch the persisted project on load (localStorage only keeps the id).
   useEffect(() => {
-    if (mounted && projectId && !projectLoaded) void openProject(projectId);
+    if (mounted && projectId && !projectLoaded) void openProject(projectId).catch((error: unknown) => setLoadError(error instanceof Error ? error.message : "Could not load project"));
   }, [mounted, projectId, projectLoaded]);
 
   // Ctrl+M flips between the board and the chat. Ctrl only: Cmd+M minimizes
@@ -58,7 +59,7 @@ export default function Home() {
       <div className="h-screen flex flex-col bg-zinc-50 text-zinc-900">
         {projectId ? (
           <div className="flex-1 flex items-center justify-center text-sm text-zinc-500">
-            Loading project…
+            {loadError ? <div role="alert">{loadError}<button className="ml-3 underline" onClick={() => { setLoadError(null); useStore.getState().closeProject(); }}>Back to projects</button></div> : "Loading project…"}
           </div>
         ) : (
           <ProjectPicker />

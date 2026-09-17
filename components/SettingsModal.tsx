@@ -4,8 +4,13 @@ import { useEffect, useState } from "react";
 import { useStore } from "@/lib/store";
 import {
   DEFAULT_MODEL,
+  DEFAULT_REASONING_EFFORT,
   MODEL_CHOICES,
+  REASONING_LABELS,
+  reasoningEffortsForModel,
+  resolveReasoningEffort,
   type ModelProvider,
+  type ReasoningEffort,
 } from "@/lib/models";
 import AttachmentEditor from "./AttachmentEditor";
 import StatsModal from "./StatsModal";
@@ -28,15 +33,27 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const setProject = useStore((s) => s.setProject);
 
   const [model, setModel] = useState(DEFAULT_MODEL);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(DEFAULT_REASONING_EFFORT);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
   const [showStats, setShowStats] = useState(false);
+  const reasoningLevels = reasoningEffortsForModel(model);
+  const effectiveEffort = resolveReasoningEffort(model, reasoningEffort);
 
   useEffect(() => {
     void fetch("/api/config")
-      .then((res) => res.json())
-      .then((cfg: { model?: string }) => setModel(cfg.model || DEFAULT_MODEL))
-      .finally(() => setLoaded(true));
+      .then((res) => {
+        if (!res.ok) throw new Error("Could not load settings. Close and try again.");
+        return res.json();
+      })
+      .then((cfg: { model?: string; reasoningEffort?: ReasoningEffort }) => {
+        const savedModel = cfg.model || DEFAULT_MODEL;
+        setModel(savedModel);
+        setReasoningEffort(resolveReasoningEffort(savedModel, cfg.reasoningEffort) ?? DEFAULT_REASONING_EFFORT);
+        setLoaded(true);
+      })
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Could not load settings."));
   }, []);
 
   useEffect(() => {
@@ -52,12 +69,20 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   async function save() {
     if (busy) return;
     setBusy(true);
-    await fetch("/api/config", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model }),
-    });
-    onClose();
+    setError(undefined);
+    try {
+      const res = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, reasoningEffort: effectiveEffort }),
+      });
+      if (!res.ok) throw new Error("Could not save settings. Please try again.");
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save settings.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   // The stats view takes over the whole overlay rather than stacking on it, so
@@ -80,8 +105,12 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
             <select
               className="mt-1 w-full rounded-lg bg-zinc-50 border border-zinc-300 px-2 py-1.5 text-sm outline-none focus:border-zinc-500 disabled:opacity-50"
               value={model}
-              disabled={!loaded}
-              onChange={(e) => setModel(e.target.value)}
+              disabled={!loaded || busy}
+              onChange={(e) => {
+                const nextModel = e.target.value;
+                setModel(nextModel);
+                setReasoningEffort(resolveReasoningEffort(nextModel, reasoningEffort) ?? DEFAULT_REASONING_EFFORT);
+              }}
             >
               {PROVIDERS.map((provider) => (
                 <optgroup key={provider.value} label={provider.label}>
@@ -96,15 +125,41 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
               ))}
             </select>
           </label>
-          <label className="block">
-            <span className="text-sm font-medium text-zinc-700">Context length</span>
-            <select
-              className="mt-1 w-full rounded-lg bg-zinc-50 border border-zinc-300 px-2 py-1.5 text-sm outline-none focus:border-zinc-500"
-              defaultValue="200k"
-            >
-              <option value="200k">200k</option>
-            </select>
-          </label>
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="reasoning-level" className="text-sm font-medium text-zinc-700">
+                Reasoning level
+              </label>
+              <span className="text-sm font-medium text-violet-600">
+                {effectiveEffort ? REASONING_LABELS[effectiveEffort] : "Not available"}
+              </span>
+            </div>
+            <input
+              id="reasoning-level"
+              type="range"
+              min={0}
+              max={Math.max(1, reasoningLevels.length - 1)}
+              step={1}
+              value={effectiveEffort ? reasoningLevels.indexOf(effectiveEffort) : 0}
+              disabled={!loaded || busy || !effectiveEffort}
+              aria-valuetext={effectiveEffort ? REASONING_LABELS[effectiveEffort] : "Not available"}
+              aria-describedby="reasoning-description"
+              onChange={(e) => setReasoningEffort(reasoningLevels[Number(e.target.value)])}
+              className="mt-3 block h-2 w-full cursor-pointer accent-violet-600 disabled:cursor-not-allowed disabled:opacity-40"
+            />
+            {effectiveEffort && (
+              <div className="mt-2 flex justify-between text-[10px] text-zinc-500" aria-hidden="true">
+                {reasoningLevels.map((level) => <span key={level}>{REASONING_LABELS[level]}</span>)}
+              </div>
+            )}
+            <p id="reasoning-description" className="mt-2 text-xs text-zinc-500">
+              {!effectiveEffort
+                ? "This model does not offer adjustable reasoning levels."
+                : effectiveEffort === "ultra"
+                  ? "Maximum reasoning with automatic task delegation."
+                  : "Higher levels spend more time reasoning. Defaults to High."}
+            </p>
+          </div>
           {/* The project's own fields autosave like everything else the person
             * types (browser-owned, see lib/run-state.ts); Save below is for the
             * app-wide settings only. */}
@@ -192,6 +247,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
             </div>
           )}
         </div>
+        {error && <p role="alert" className="mt-4 text-sm text-red-600">{error}</p>}
         <div className="mt-6 flex items-center gap-2">
           <button
             className="mr-auto rounded-lg px-3 py-1.5 text-sm text-zinc-500 hover:bg-zinc-100"

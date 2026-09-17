@@ -1,6 +1,6 @@
 import type { AgentDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { selectedModel } from "../config";
-import { providerForModel } from "../models";
+import { PROVIDER_CAPABILITIES, providerForModel } from "../models";
 import {
   type AgentRequest,
   type ChatEntry,
@@ -9,9 +9,9 @@ import {
   type Project,
 } from "../types";
 import { streamAgent } from "./agent";
-import { addTicketsToBoard, boardServer, REQUEST_SCHEMA } from "./board-tools";
+import { runLimiter } from "./run-limiter";
+import { addTicketsToBoard, boardServer, parsePlannedTickets, REQUEST_SCHEMA } from "./board-tools";
 import * as store from "./project-store";
-import type { PlannedTicket } from "./project-store";
 import { ensureLoaded, notifyAgent, registry } from "./runs";
 
 /**
@@ -23,7 +23,7 @@ import { ensureLoaded, notifyAgent, registry } from "./runs";
  * Turns are taken one at a time from a per-project queue (`registry.requests`),
  * in the order the messages were sent: one conversation, so a second message
  * waits for the first to finish rather than being refused. The queue lives in
- * memory beside the live turn; a server restart forgets both.
+ * persisted project state. Interrupted turns remain available for retry.
  */
 
 export const ACT_AGENTS: Record<string, AgentDefinition> = {
@@ -115,7 +115,9 @@ function say(dir: string, mode: Mode, entry: Omit<ChatEntry, "ts" | "mode">) {
 
 function requests(dir: string): AgentRequest[] {
   let list = registry.requests.get(dir);
-  if (!list) registry.requests.set(dir, (list = []));
+  if (!list) registry.requests.set(dir, (list = (store.getProject(dir)?.agentRequests ?? []).map((r) =>
+    r.state === "running" ? { ...r, state: "error", error: "Server restarted during this request. Retry to continue." } : { ...r },
+  )));
   return list;
 }
 
@@ -125,6 +127,7 @@ function requests(dir: string): AgentRequest[] {
  * runs the message goes straight into it instead — the agent hears it with its
  * next tool result — and it is written to the transcript now, as heard. */
 export function sendToAgent(dir: string, mode: Mode, message: string): AgentRequest | null {
+  if (registry.removing.has(dir)) throw new Error("Project is being removed");
   if (!ensureLoaded(dir)) throw new Error(`No project at ${dir}`);
   if (
     mode === "act" &&
@@ -143,25 +146,47 @@ export function sendToAgent(dir: string, mode: Mode, message: string): AgentRequ
 
 /** Take the next waiting request, if no turn is running. Every finished turn
  * calls this again, which is what drains the queue. */
-async function pump(dir: string): Promise<void> {
-  if (registry.agents.has(dir)) return;
+function pump(dir: string): Promise<void> {
+  const existing = registry.agentTasks.get(dir);
+  if (existing) return existing;
+  const task = pumpOnce(dir);
+  registry.agentTasks.set(dir, task);
+  void task.finally(() => {
+    registry.agentTasks.delete(dir);
+    if (!registry.removing.has(dir) && requests(dir).some((r) => r.state === "queued") && !registry.agents.has(dir)) {
+      void pump(dir);
+    }
+  }).catch((error) => console.error("Project agent queue failed", error));
+  return task;
+}
+
+export function resumeQueuedAgent(dir: string): void { void pump(dir); }
+
+async function pumpOnce(dir: string): Promise<void> {
+  if (registry.removing.has(dir) || registry.agents.has(dir)) return;
   const req = requests(dir).find((r) => r.state === "queued");
   if (!req) return;
   const ctrl = new AbortController();
   registry.agents.set(dir, ctrl);
   registry.agentMode.set(dir, req.mode);
   req.state = "running";
+  notifyAgent(dir);
   // The transcript shows the message when the agent actually hears it, so it
   // reads in the order the agent did — and a request cancelled while waiting
   // was never said at all.
-  say(dir, req.mode, { kind: "user", text: req.text });
-  notifyAgent(dir);
+  const model = selectedModel();
+  let releaseCapacity: (() => void) | undefined;
   let error: string | null = null;
   try {
-    error = await turn(dir, req.mode, req.text, ctrl.signal);
+    await store.flush(dir);
+    releaseCapacity = await runLimiter.acquire(providerForModel(model), ctrl.signal);
+    ctrl.signal.throwIfAborted();
+    say(dir, req.mode, { kind: "user", text: req.text });
+    error = await turn(dir, req.mode, req.text, ctrl.signal, model);
   } catch (err) {
     error = String(err);
   } finally {
+    releaseCapacity?.();
     registry.agents.delete(dir);
     registry.agentMode.delete(dir);
     registry.subagents.delete(dir);
@@ -174,7 +199,6 @@ async function pump(dir: string): Promise<void> {
       dropRequest(dir, req.id);
     }
     notifyAgent(dir);
-    void pump(dir);
   }
 }
 
@@ -201,6 +225,7 @@ export function cancelRequest(dir: string, id: string): void {
 
 /** Send a failed request again, unchanged, at its place in the stack. */
 export function retryRequest(dir: string, id: string): void {
+  if (registry.removing.has(dir)) return;
   const req = requests(dir).find((r) => r.id === id && r.state === "error");
   if (!req) return;
   req.state = "queued";
@@ -214,13 +239,13 @@ async function turn(
   dir: string,
   mode: Mode,
   message: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  model: string,
 ): Promise<string | null> {
-  const model = selectedModel();
   const provider = providerForModel(model);
   // Codex and Gemini have no in-process MCP: their panel turn answers with
   // the ticket list as structured output instead of calling the board tool.
-  const fallback = mode === "panel" && provider !== "claude";
+  const fallback = mode === "panel" && !PROVIDER_CAPABILITIES[provider].boardTools;
 
   const attempt = async (fresh: boolean): Promise<string | null | "retry"> => {
     const project = store.getProject(dir)!;
@@ -249,7 +274,7 @@ async function turn(
         forwardSubagentText: mode === "act",
         agents: mode === "act" ? ACT_AGENTS : undefined,
         // An act turn that backgrounds a command leaves an orphan that breaks
-        // the board tools on the next panel turn (see agent.ts).
+        // the board tools on the next panel turn (see claude.ts).
         disableBackgroundTasks: true,
         outputSchema: fallback ? REQUEST_SCHEMA : undefined,
       });
@@ -276,8 +301,8 @@ async function turn(
           }
         } else if (ev.type === "result") {
           if (!ev.ok) failed = ev.text;
-          else if (fallback && ev.structuredOutput) {
-            const { tickets } = ev.structuredOutput as { tickets: PlannedTicket[] };
+          else if (fallback) {
+            const tickets = parsePlannedTickets(ev.structuredOutput);
             addTicketsToBoard(dir, tickets);
           }
         } else if (ev.type === "error") {

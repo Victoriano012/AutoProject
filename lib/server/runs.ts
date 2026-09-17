@@ -1,88 +1,22 @@
 import {
   type AgentRequest,
-  type Attachment,
-  fileBlockedBy,
   isTicketDone,
   type LiveSubagent,
   type Mode,
-  notReadyReason,
   type Project,
-  type SchedulerFacts,
   type Ticket,
-  type Worker,
-  workerBusyOn,
 } from "../types";
 import { resumableSession } from "../agent-session";
 import { selectedModel } from "../config";
 import { addStats } from "../stats";
-import { type RunUsage, streamAgent } from "./agent";
 import * as store from "./project-store";
 
-/**
- * The run registry: agent runs execute here, in the server process, so they
- * outlive the browser tab that started them. Per-ticket entries are keyed by
- * `ticketKey(dir, id)`, per-project ones by the project dir. It does not
- * survive a server restart — a fresh process settles whatever project.json
- * still says is running (see settleZombies).
- */
-interface Registry {
-  /** Live agent sessions, by ticket key. */
-  controllers: Map<string, AbortController>;
-  /** Project runs that want to continue: draining now, or waiting on a review. */
-  active: Set<string>;
-  /** Scheduler loops actually draining work, by dir. */
-  loops: Set<string>;
-  /** Tickets the user stopped; the scheduler must not restart them. */
-  userStopped: Set<string>;
-  /** Human messages waiting for a ticket's files to come free, by ticket key. */
-  pendingFeedback: Map<string, string>;
-  /** Extra indications typed on a card whose agent is at work, by ticket key.
-   * The ticket's own run loop takes them and resumes its session with them —
-   * nothing else may, or there would be two agents in one workspace. */
-  notes: Map<string, string[]>;
-  /** Wakes a scheduler loop that is waiting on its runs, so it can pick up work
-   * that appeared since (a card added while another card was running). */
-  wakes: Map<string, () => void>;
-  /** The project agent's live turn, by project dir — one agent per project. */
-  agents: Map<string, AbortController>;
-  /** Which mode that turn was sent in, so a client connecting mid-turn knows. */
-  agentMode: Map<string, Mode>;
-  /** The subagents that turn has running, oldest first. */
-  subagents: Map<string, LiveSubagent[]>;
-  /** Messages for the project agent, by dir, in the order they were sent: the
-   * one running first, then the ones waiting, with failed ones left in place. */
-  requests: Map<string, AgentRequest[]>;
-  /** Hands a message to the project agent's live turn (see AgentEvent "input"),
-   * by dir; absent while it runs on a CLI that cannot take one mid-turn. */
-  inputs: Map<string, (text: string) => boolean>;
-}
-
-const globals = globalThis as unknown as { __autoprojectRegistry?: Registry };
-export const registry: Registry = (globals.__autoprojectRegistry ??= {
-  controllers: new Map(),
-  active: new Set(),
-  loops: new Set(),
-  userStopped: new Set(),
-  pendingFeedback: new Map(),
-  notes: new Map(),
-  wakes: new Map(),
-  agents: new Map(),
-  agentMode: new Map(),
-  subagents: new Map(),
-  requests: new Map(),
-  inputs: new Map(),
-});
-// A dev-server hot reload keeps the old registry object, which predates these.
-registry.pendingFeedback ??= new Map();
-registry.notes ??= new Map();
-registry.wakes ??= new Map();
-registry.agents ??= new Map();
-registry.agentMode ??= new Map();
-registry.subagents ??= new Map();
-registry.requests ??= new Map();
-registry.inputs ??= new Map();
-
-const ticketKey = (dir: string, id: string) => dir + "\u0000" + id;
+import { registry, ticketKey } from "./run-registry";
+export { registry } from "./run-registry";
+import { createBoardIndex } from "../board-index";
+import { inheritedAttachments, workerOf, ticketPrompt } from "./ticket-prompt";
+import { runWithNotes } from "./ticket-session";
+export { ticketPrompt } from "./ticket-prompt";
 
 export interface RunState {
   /** Non-empty while the project's scheduler loop is draining work. */
@@ -106,7 +40,7 @@ export function runState(dir: string): RunState {
   return {
     loops: registry.loops.has(dir) ? [dir] : [],
     active: registry.active.has(dir) ? [dir] : [],
-    tickets: [...registry.controllers.keys()]
+    tickets: [...new Set([...registry.claims.keys(), ...registry.controllers.keys()])]
       .filter((k) => k.startsWith(prefix))
       .map((k) => k.slice(prefix.length)),
     agent: {
@@ -125,238 +59,49 @@ export function notifyRuns(dir: string): void {
 /** The project agent started or finished a turn, or its queue changed: tell
  * every open tab, both as its own event and through the run snapshot. */
 export function notifyAgent(dir: string): void {
+  const project = store.getProject(dir);
+  if (project) store.setProject(dir, { ...project, agentRequests: (registry.requests.get(dir) ?? []).map((r) => ({ ...r })) });
   store.publish(dir, { type: "agent", ...runState(dir).agent });
   notifyRuns(dir);
 }
 
 /** Load a project into the server store, settling orphans on a cold load. */
 export function ensureLoaded(dir: string): Project | null {
+  if (registry.removing.has(dir)) return null;
   const cold = !store.isLoaded(dir);
   const project = store.getProject(dir);
   // A "running" left in project.json by a process that is gone has nothing to
   // abort and nothing that will ever finish it.
-  if (project && cold) settleZombies(dir);
+  if (project && (cold || !registry.requests.has(dir))) {
+    if (cold) settleZombies(dir);
+    for (const [id, message] of Object.entries(project.pendingFeedback ?? {})) {
+      registry.pendingFeedback.set(ticketKey(dir, id), message);
+    }
+    // Interrupted requests are retained for an explicit retry; never silently
+    // replay an action after a crash. Requests not yet dispatched stay queued.
+    registry.requests.set(dir, (project.agentRequests ?? []).map((request) =>
+      request.state === "running"
+        ? { ...request, state: "error" as const, error: "Server restarted during this request. Retry to continue." }
+        : { ...request },
+    ));
+    if (Object.keys(project.pendingFeedback ?? {}).length) queueMicrotask(() => autoRun(dir));
+    if ((registry.requests.get(dir) ?? []).some((request) => request.state === "queued")) {
+      void import("./project-agent").then(({ resumeQueuedAgent }) => {
+        if (!registry.removing.has(dir)) resumeQueuedAgent(dir);
+      }).catch((error) => console.error("Could not restore the project queue", error));
+    }
+  }
   return store.getProject(dir);
-}
-
-// ---- prompt building ------------------------------------------------------
-
-function inheritedAttachments(project: Project, ticket: Ticket): Attachment[] {
-  return [...(project.attachments ?? []), ...(ticket.attachments ?? [])];
-}
-
-const workerOf = (project: Project, ticket: Ticket): Worker | undefined =>
-  project.workers.find((w) => w.id === ticket.workerId);
-
-/** What a ticket's agent is told. Pure, so tests can read it. */
-export function ticketPrompt(project: Project, ticket: Ticket): string {
-  const worker = workerOf(project, ticket);
-  const lines = [
-    `You are an autonomous engineer working on the project "${project.name}" inside the current working directory. Do the work described by the ticket below directly in this directory.`,
-    // A worker with a session has this conversation's earlier tickets in it.
-    worker &&
-      `You are worker #${worker.n} (${worker.description}).` +
-        (worker.sessionId
-          ? " Earlier tickets in this conversation are done; this is a new ticket."
-          : ""),
-    project.description && `\nProject description:\n${project.description}`,
-    project.notes.length > 0 &&
-      `\nStanding instructions for this project (always apply):\n` +
-        project.notes.map((n) => `- ${n}`).join("\n"),
-    `\n## Ticket: ${ticket.title}\n${ticket.description || "(no further description)"}`,
-    `\nA human will review this ticket when you finish. If the workspace is a git repository, commit your work when done (one commit, message = ticket title). End your reply with (1) a 2-4 sentence summary of what you did and (2) a short checklist of what the human should test.`,
-  ];
-  return lines.filter(Boolean).join("\n");
-}
-
-// ---- notes the person adds to a card in flight ----------------------------
-
-/** Take the indications waiting for this ticket's agent. Always drains: the
- * board writes each one into the ticket itself as well, so the durable copy is
- * the ticket's description and this queue only carries the live hand-over. */
-function takeNotes(key: string): string[] {
-  const notes = registry.notes.get(key) ?? [];
-  registry.notes.delete(key);
-  return notes;
-}
-
-/** What an aborted session says in the log: the person's stop — unless it was
- * their own note interrupting the agent, which the run resumes from. */
-function abortText(key: string): string {
-  return registry.notes.has(key)
-    ? "Taking your indication into account…"
-    : "Stopped by user";
 }
 
 const ticketOf = (dir: string, id: string): Ticket | undefined =>
   store.getProject(dir)?.tickets.find((t) => t.id === id);
 
-// ---- what the work cost ---------------------------------------------------
-
-/**
- * Fold one agent session's numbers into the ticket that ran.
- *
- * A server-written ticket field, so `stats` is in `runFields` (see
- * run-state.ts) — without that the browser's next autosave would wipe every
- * total, since the browser owns the ticket otherwise.
- *
- * Only what the provider actually reported goes in: time is measured here,
- * tokens and cost come from the result message, and a run whose provider gave
- * no cost is counted in `runsWithoutCost` instead of being priced from a table.
- */
-function recordRun(dir: string, ticketId: string, ms: number, usage?: RunUsage): void {
-  store.updateTicket(dir, ticketId, (t) => ({
-    ...t,
-    stats: addStats(t.stats, {
-      runs: 1,
-      ms,
-      tokens: usage?.tokens ?? 0,
-      costUsd: usage?.costUsd ?? 0,
-      runsWithoutCost: usage?.costUsd === undefined ? 1 : 0,
-    }),
-  }));
-}
-
-// ---- one agent session ----------------------------------------------------
-
-async function runAgentSession(
-  dir: string,
-  ticketId: string,
-  body: {
-    prompt: string;
-    sessionId?: string;
-    attachments?: Attachment[];
-    model?: string;
-  }
-): Promise<{ ok: boolean; text: string; aborted: boolean }> {
-  const key = ticketKey(dir, ticketId);
-  const ctrl = new AbortController();
-  registry.controllers.set(key, ctrl);
-  notifyRuns(dir);
-
-  let ok = false;
-  let finalText = "";
-  let usage: RunUsage | undefined;
-  const started = Date.now();
-
-  try {
-    const events = streamAgent({
-      workspaceDir: store.getProject(dir)?.workspaceDir,
-      prompt: body.prompt,
-      sessionId: body.sessionId,
-      attachments: body.attachments?.map(({ name, dataUrl }) => ({ name, dataUrl })),
-      signal: ctrl.signal,
-      model: body.model,
-      writeAccess: true,
-    });
-    for await (const ev of events) {
-      if (ev.type === "init") {
-        store.updateTicket(dir, ticketId, (t) => ({ ...t, sessionId: ev.sessionId }));
-        // The worker's conversation is what its next ticket resumes.
-        const workerId = ticketOf(dir, ticketId)?.workerId;
-        if (workerId) store.setWorkerSession(dir, workerId, ev.sessionId);
-      } else if (ev.type === "text") {
-        store.appendLog(dir, ticketId, { kind: "text", text: ev.text, ts: Date.now() });
-      } else if (ev.type === "tool") {
-        store.appendLog(dir, ticketId, { kind: "tool", text: ev.text, ts: Date.now() });
-      } else if (ev.type === "result") {
-        ok = ev.ok;
-        finalText = ev.text ?? "";
-        usage = ev.usage;
-      } else if (ev.type === "error") {
-        ok = false;
-        finalText = ev.message;
-        // An error the abort itself caused is not the run's own failure — the
-        // CLI reports the interrupt as one. What actually happened (the person's
-        // stop, or their note) is logged below instead.
-        if (!ctrl.signal.aborted) {
-          store.appendLog(dir, ticketId, { kind: "error", text: ev.message, ts: Date.now() });
-        }
-      }
-    }
-    if (ctrl.signal.aborted) {
-      ok = false;
-      finalText = "Stopped by user";
-      store.appendLog(dir, ticketId, { kind: "info", text: abortText(key), ts: Date.now() });
-    }
-  } catch (err) {
-    ok = false;
-    // A user stop is not a failure: log it as info, not error.
-    finalText = ctrl.signal.aborted ? "Stopped by user" : String(err);
-    store.appendLog(dir, ticketId, {
-      kind: ctrl.signal.aborted ? "info" : "error",
-      text: ctrl.signal.aborted ? abortText(key) : finalText,
-      ts: Date.now(),
-    });
-  } finally {
-    registry.controllers.delete(key);
-    // A stopped or failed session still spent the time and the tokens it spent.
-    recordRun(dir, ticketId, Date.now() - started, usage);
-    notifyRuns(dir);
-  }
-  return { ok, text: finalText, aborted: ctrl.signal.aborted };
-}
-
-/**
- * The ticket's session, and any session the person's own indications ask for
- * after it. A note typed on the card interrupts the open session (see
- * `noteTicket`); this resumes that same session with what they said, so
- * everything the agent had already done stays in its context, the ticket keeps
- * its "running" status throughout — the card never leaves Working — and there
- * is never a second agent in one workspace. Normally exactly one pass.
- */
-async function runWithNotes(
-  dir: string,
-  ticketId: string,
-  body: {
-    prompt: string;
-    sessionId?: string;
-    attachments?: Attachment[];
-    model: string;
-  }
-): Promise<{ ok: boolean; text: string; aborted: boolean }> {
-  const key = ticketKey(dir, ticketId);
-  for (;;) {
-    const outcome = await runAgentSession(dir, ticketId, body);
-    const notes = takeNotes(key);
-    if (notes.length === 0 || registry.userStopped.has(key)) return outcome;
-    const resumed = resumableSession(ticketOf(dir, ticketId)?.sessionId, body.model)?.stored;
-    // No session to resume (the agent never reached init): the ticket settles,
-    // and the indication is still in its description for the next run.
-    if (!resumed) return outcome;
-    body = {
-      prompt:
-        `While you were working, the person added indications for this ticket:\n\n` +
-        notes.join("\n\n") +
-        `\n\nTake them into account and carry on with the ticket, then finish as instructed above.`,
-      sessionId: resumed,
-      model: body.model,
-    };
-  }
-}
-
-/**
- * The person's stop, written where everyone can see it.
- *
- * `userStopped` lives in the registry, so it is invisible to the board: a card
- * held out of the queue by it alone sits in the Working column labelled Queued
- * with nothing ever starting it, which is exactly the lie this whole invariant
- * exists to prevent. `paused` is the persisted half of the same fact — the
- * board reads it (`boardColumn` → Blocked, "Paused", with a Run button back)
- * and it survives a server restart, which the skip never did.
- *
- * Only ever written once the ticket is out of "running": the board clears a
- * pause it sees on a card whose agent is still winding down, so a run being
- * aborted parks itself in the same write that settles its status (see
- * `runTicketOnce`).
- *
- * And only on "todo", the one status that can lie: that is the card the board
- * shows in Working as Queued. A card in review or error already says what it
- * is, and parking it would move it out of the column the person left it in.
- */
+/** Persist the stop immediately, even while an abort is winding down, so a
+ * crash before process exit cannot turn stopped work into runnable work. */
 function park(dir: string, ticketId: string): void {
   const t = ticketOf(dir, ticketId);
-  if (!t || t.paused || t.status !== "todo") return;
+  if (!t || t.paused || (t.status !== "todo" && t.status !== "running")) return;
   store.updateTicket(dir, ticketId, (x) => ({ ...x, paused: true }));
 }
 
@@ -443,58 +188,92 @@ export function noteTicket(dir: string, ticketId: string, message: string): void
 const sessionFor = (project: Project, ticket: Ticket): string | undefined =>
   workerOf(project, ticket)?.sessionId ?? ticket.sessionId;
 
-/** Why this ticket's agent cannot start right now, worded for its log: another
- * card is in one of its files, or its worker is still on another card. */
-function holdReason(tickets: Ticket[], ticketId: string): string | null {
-  const claim = fileBlockedBy(tickets, ticketId);
+/** Runtime claims outlive card edits/deletion and are released only after the
+ * complete run has unwound, including any resumed notes. */
+export function claimedTickets(dir: string): Ticket[] {
+  const tickets = new Map((store.getProject(dir)?.tickets ?? []).map((t) => [t.id, t]));
+  for (const claim of registry.claims.values()) {
+    if (claim.dir === dir) tickets.set(claim.ticket.id, { ...claim.ticket, status: "running" });
+  }
+  return [...tickets.values()];
+}
+
+function holdReason(dir: string, ticketId: string): string | null {
+  if (ownsTicket(dir, ticketId)) return "Waiting for the previous run to finish stopping.";
+  const index = createBoardIndex(claimedTickets(dir));
+  const claim = index.fileHolders(ticketId)[0];
   if (claim) return `Waiting for ${claim.file}: “${claim.by.title}” is changing it.`;
-  const busy = workerBusyOn(tickets, ticketId);
+  const busy = index.workerBusyOn(ticketId);
   if (busy) return `Waiting for its worker: still on “${busy.title}”.`;
   return null;
 }
 
-/** Send human feedback into the ticket's existing agent session. */
+async function withTicketClaim(dir: string, ticketId: string, work: () => Promise<void>): Promise<void> {
+  if (registry.removing.has(dir) || ownsTicket(dir, ticketId)) return;
+  const ticket = ticketOf(dir, ticketId);
+  if (!ticket) return;
+  const key = ticketKey(dir, ticketId);
+  let release!: () => void;
+  const done = new Promise<void>((resolve) => { release = resolve; });
+  registry.claims.set(key, { dir, ticket: { ...ticket, files: [...(ticket.files ?? [])] }, done, release });
+  try { await work(); }
+  finally {
+    registry.claims.delete(key);
+    if (registry.pendingFeedback.has(key) && !registry.userStopped.has(key) && !registry.removing.has(dir)) {
+      store.updateTicket(dir, ticketId, (ticket) => ({ ...ticket, status: "todo" }));
+    }
+    release();
+    notifyRuns(dir);
+    autoRun(dir);
+  }
+}
+
+function persistFeedback(dir: string): void {
+  const project = store.getProject(dir);
+  if (!project) return;
+  const prefix = dir + "\u0000";
+  const pendingFeedback = Object.fromEntries([...registry.pendingFeedback]
+    .filter(([key]) => key.startsWith(prefix)).map(([key, value]) => [key.slice(prefix.length), value]));
+  store.setProject(dir, { ...project, pendingFeedback });
+}
+
 export async function sendFeedback(
+  dir: string, ticketId: string, message: string, rejection = false, logged = false,
+): Promise<void> {
+  const ticket = ticketOf(dir, ticketId);
+  if (registry.removing.has(dir) || !ticket) return;
+  if (!logged && (rejection || ticket.status === "review")) {
+    store.updateTicket(dir, ticketId, (t) => ({ ...t, stats: addStats(t.stats, { rejections: 1 }) }));
+  }
+  const held = holdReason(dir, ticketId);
+  if (held) {
+    const key = ticketKey(dir, ticketId);
+    const queued = registry.pendingFeedback.get(key);
+    registry.pendingFeedback.set(key, queued ? `${queued}\n\n${message}` : message);
+    persistFeedback(dir);
+    // The wait, then what waits: the card shows the person their own words
+    // under the reason nothing has happened to them yet. The wait line goes
+    // when the agent gets them (see runTicket).
+    store.appendLog(dir, ticketId, { kind: "info", text: held, ts: Date.now() });
+    store.appendLog(dir, ticketId, { kind: "user", text: message, ts: Date.now() });
+    if (!ownsTicket(dir, ticketId)) store.updateTicket(dir, ticketId, (t) => ({ ...t, status: "todo" }));
+    return;
+  }
+
+  await withTicketClaim(dir, ticketId, () => sendFeedbackNow(dir, ticketId, message, logged));
+}
+
+/** Send human feedback into the ticket's existing agent session. */
+async function sendFeedbackNow(
   dir: string,
   ticketId: string,
   message: string,
-  rejection = false,
   // The message is already on the card's log, written when it was queued.
   logged = false
 ): Promise<void> {
   const project = store.getProject(dir);
   const ticket = project?.tickets.find((t) => t.id === ticketId);
   if (!project || !ticket) return;
-
-  // The one thing the logs cannot be read back for: a rejection and a note both
-  // write the same `kind: "user"` line, so the count is kept as it happens.
-  // `rejection` is the board's ✕ — which may reset the card to todo before this
-  // call, so its status cannot be trusted here.
-  if (rejection || ticket.status === "review") {
-    store.updateTicket(dir, ticketId, (t) => ({
-      ...t,
-      stats: addStats(t.stats, { rejections: 1 }),
-    }));
-  }
-
-  // Answering a ticket puts its agent back to work, which re-claims its files
-  // and its worker — and another ticket may have taken either while it sat in
-  // review. The message waits with the ticket rather than starting a second
-  // agent in that file or conversation; the scheduler delivers it (see
-  // runTicket) as soon as they free.
-  const held = holdReason(project.tickets, ticketId);
-  if (held) {
-    const key = ticketKey(dir, ticketId);
-    const queued = registry.pendingFeedback.get(key);
-    registry.pendingFeedback.set(key, queued ? `${queued}\n\n${message}` : message);
-    // The wait, then what waits: the card shows the person their own words
-    // under the reason nothing has happened to them yet. The wait line goes
-    // when the agent gets them (see runTicket).
-    store.appendLog(dir, ticketId, { kind: "info", text: held, ts: Date.now() });
-    store.appendLog(dir, ticketId, { kind: "user", text: message, ts: Date.now() });
-    store.updateTicket(dir, ticketId, (t) => ({ ...t, status: "todo" }));
-    return;
-  }
 
   const model = selectedModel();
   const activeSession = resumableSession(sessionFor(project, ticket), model)?.stored;
@@ -546,12 +325,13 @@ export function rejectTicket(dir: string, ticketId: string, message: string): Pr
 /** Approve a ticket in review (or force-complete any ticket). */
 export function approveTicket(dir: string, ticketId: string): void {
   store.updateTicket(dir, ticketId, (t) => ({ ...t, status: "done" }));
-  // Approving releases the ticket's files, which may be all another card needed.
+  // An idle approved ticket may unblock work. A live process retains its claims.
   autoRun(dir);
 }
 
 /** Run one ticket's agent. */
 export async function runTicket(dir: string, ticketId: string): Promise<void> {
+  if (registry.removing.has(dir) || ownsTicket(dir, ticketId)) return;
   const key = ticketKey(dir, ticketId);
   registry.userStopped.delete(key);
   unpark(dir, ticketId);
@@ -563,7 +343,7 @@ export async function runTicket(dir: string, ticketId: string): Promise<void> {
   // and the scheduler starting two such cards from one ready set: the first to
   // start is running by the time the second gets here. Saying so beats doing
   // nothing.
-  const held = holdReason(project.tickets, ticketId);
+  const held = holdReason(dir, ticketId);
   if (held) {
     store.appendLog(dir, ticketId, { kind: "info", text: held, ts: Date.now() });
     return;
@@ -581,11 +361,12 @@ export async function runTicket(dir: string, ticketId: string): Promise<void> {
   const waiting = registry.pendingFeedback.get(key);
   if (waiting) {
     registry.pendingFeedback.delete(key);
-    await sendFeedback(dir, ticketId, waiting, false, true);
+    persistFeedback(dir);
+    await withTicketClaim(dir, ticketId, () => sendFeedbackNow(dir, ticketId, waiting, true));
     return;
   }
 
-  await runTicketOnce(dir, ticketId);
+  await withTicketClaim(dir, ticketId, () => runTicketOnce(dir, ticketId));
 
   // What just finished may have unblocked another card. Inside a scheduler loop
   // this only nudges a loop that was going to look anyway; outside one — the run
@@ -593,21 +374,15 @@ export async function runTicket(dir: string, ticketId: string): Promise<void> {
   autoRun(dir);
 }
 
-/** The tickets an agent could be started on right now. The scheduler
- * dispatches exactly these, and `autoRun` asks the same question to decide
- * whether starting a scheduler is worth it — one definition, so the two can
- * never disagree and spin. The rules live in `notReadyReason`, which the board
- * also uses to check that a card it shows in Working really is about to run;
- * only the one fact that exists solely in this process is supplied from here. */
+/** Index one scheduler snapshot, including claims for cards removed or edited
+ * while their processes are still winding down. */
 function readyTickets(dir: string): Ticket[] {
+  if (registry.removing.has(dir)) return [];
   const tickets = store.getProject(dir)?.tickets ?? [];
-  const facts = schedulerFacts(dir);
-  return tickets.filter((t) => notReadyReason(tickets, t, facts) === null);
-}
-
-/** The fact `notReadyReason` cannot know: which tickets the person stopped. */
-function schedulerFacts(dir: string): SchedulerFacts {
-  return { stopped: (id: string) => registry.userStopped.has(ticketKey(dir, id)) };
+  const index = createBoardIndex(claimedTickets(dir));
+  return tickets.filter((t) => t.status === "todo" && !t.paused &&
+    !registry.userStopped.has(ticketKey(dir, t.id)) && !ownsTicket(dir, t.id) &&
+    index.fileHolders(t.id).length === 0 && !index.workerBusyOn(t.id));
 }
 
 /**
@@ -619,6 +394,7 @@ function schedulerFacts(dir: string): SchedulerFacts {
  * `runProject` is a no-op while a loop is already draining the board.
  */
 export function autoRun(dir: string): void {
+  if (registry.removing.has(dir)) return;
   // A loop is already draining this board, but it is asleep until one of its
   // runs finishes — which is why a card added next to a running one used to sit
   // queued for as long as that card took. Wake it so it looks again now.
@@ -659,7 +435,20 @@ function reviveFailures(dir: string): void {
  * parallel, each in its own agent session; whenever one finishes, newly
  * unblocked tickets are started.
  */
-export async function runProject(dir: string, resume = false): Promise<void> {
+export function runProject(dir: string, resume = false): Promise<void> {
+  const existing = registry.loopTasks.get(dir);
+  if (existing) {
+    if (!resume) void drainProject(dir, false);
+    return existing;
+  }
+  const task = drainProject(dir, resume);
+  registry.loopTasks.set(dir, task);
+  void task.finally(() => registry.loopTasks.delete(dir)).catch((error) => console.error("Scheduler failed", error));
+  return task;
+}
+
+async function drainProject(dir: string, resume: boolean): Promise<void> {
+  if (registry.removing.has(dir)) return;
   // Pressing run lifts the user-stopped skip; only an internal resume (an
   // approval, a rejection, a new card) keeps it, so the board moving on never
   // restarts work the user deliberately stopped. This cannot be inferred from
@@ -722,7 +511,7 @@ export async function runProject(dir: string, resume = false): Promise<void> {
 /** Does a live run own this ticket's run state? (A person's own status edit
  * must not overwrite a run in progress.) */
 export function ownsTicket(dir: string, id: string): boolean {
-  return registry.controllers.has(ticketKey(dir, id));
+  return registry.claims.has(ticketKey(dir, id)) || registry.controllers.has(ticketKey(dir, id));
 }
 
 /** A zombie "running" — a persisted status whose run died with the server
@@ -752,10 +541,13 @@ function abortRun(dir: string, ticketId: string): void {
 }
 
 export function stopTicket(dir: string, ticketId: string): void {
-  registry.userStopped.add(ticketKey(dir, ticketId));
+  const key = ticketKey(dir, ticketId);
+  registry.userStopped.add(key);
+  registry.pendingFeedback.delete(key);
+  registry.notes.delete(key);
+  persistFeedback(dir);
   abortRun(dir, ticketId);
-  // A ticket with no live agent parks now; one still winding down parks in the
-  // write that settles it (see runTicketOnce).
+  // Persist immediately; the process keeps its runtime claim until it exits.
   park(dir, ticketId);
   notifyRuns(dir);
 }
@@ -765,6 +557,16 @@ export function stopTicket(dir: string, ticketId: string): void {
  * person presses run. An internal stop leaves them free to run. */
 export function stopProject(dir: string, byUser = false): void {
   registry.active.delete(dir);
+  registry.agents.get(dir)?.abort();
+  registry.requests.set(dir, []);
+  const prefix = dir + "\u0000";
+  for (const [key, controller] of registry.controllers) if (key.startsWith(prefix)) controller.abort();
+  for (const key of registry.pendingFeedback.keys()) if (key.startsWith(prefix)) registry.pendingFeedback.delete(key);
+  for (const key of registry.notes.keys()) if (key.startsWith(prefix)) registry.notes.delete(key);
+  persistFeedback(dir);
+  const project = store.getProject(dir);
+  if (project) store.setProject(dir, { ...project, agentRequests: [] });
+  notifyAgent(dir);
   for (const t of store.getProject(dir)?.tickets ?? []) {
     if (byUser && !isTicketDone(t)) registry.userStopped.add(ticketKey(dir, t.id));
     registry.controllers.get(ticketKey(dir, t.id))?.abort();
@@ -790,10 +592,11 @@ export function removeTickets(dir: string, ids: string[]): void {
   for (const id of ids) {
     const key = ticketKey(dir, id);
     registry.controllers.get(key)?.abort();
-    registry.userStopped.delete(key);
+    registry.userStopped.add(key);
     registry.pendingFeedback.delete(key);
     registry.notes.delete(key);
   }
+  persistFeedback(dir);
   store.removeTickets(dir, ids);
   notifyRuns(dir);
 }

@@ -1,37 +1,24 @@
-import {
-  cancelRequest,
-  retryRequest,
-  sendToAgent,
-  stopAgent,
-} from "@/lib/server/project-agent";
-import type { Mode } from "@/lib/types";
+import { cancelRequest, retryRequest, sendToAgent, stopAgent } from "@/lib/server/project-agent";
+import { agentRequestSchema } from "@/lib/server/command-schemas";
+import { ensureLoaded, registry } from "@/lib/server/runs";
+import { flush } from "@/lib/server/project-store";
 
-type AgentRequestBody =
-  | { dir: string; action: "send"; mode: Mode; message: string }
-  | { dir: string; action: "stop" }
-  | { dir: string; action: "cancel"; id: string }
-  | { dir: string; action: "retry"; id: string };
-
-// The turn runs in the server process and streams back through
-// /api/runs/stream, so this only queues, stops or drops requests.
 export async function POST(req: Request) {
-  const body = (await req.json()) as AgentRequestBody;
-  if (body.action === "stop") {
-    stopAgent(body.dir);
-    return new Response(null, { status: 204 });
-  }
-  if (body.action === "cancel") {
-    cancelRequest(body.dir, body.id);
-    return new Response(null, { status: 204 });
-  }
-  if (body.action === "retry") {
-    retryRequest(body.dir, body.id);
-    return new Response(null, { status: 204 });
-  }
+  const parsed = agentRequestSchema.safeParse(await req.json().catch(() => null));
+  if (!parsed.success) return Response.json({ error: "Invalid agent command", details: parsed.error.issues }, { status: 400 });
+  const body = parsed.data;
+  if (!ensureLoaded(body.dir)) return Response.json({ error: "Unknown project" }, { status: 404 });
+  if (registry.removing.has(body.dir)) return Response.json({ error: "Project is being removed" }, { status: 409 });
   try {
-    sendToAgent(body.dir, body.mode, body.message);
-  } catch (err) {
-    return Response.json({ error: String(err) }, { status: 400 });
+    switch (body.action) {
+      case "stop": stopAgent(body.dir); break;
+      case "cancel": cancelRequest(body.dir, body.id); break;
+      case "retry": retryRequest(body.dir, body.id); break;
+      case "send": sendToAgent(body.dir, body.mode, body.message); break;
+    }
+    await flush(body.dir);
+  } catch (error) {
+    return Response.json({ error: String(error) }, { status: 500 });
   }
-  return new Response(null, { status: 202 });
+  return new Response(null, { status: body.action === "send" || body.action === "retry" ? 202 : 204 });
 }

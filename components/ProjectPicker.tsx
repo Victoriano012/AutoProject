@@ -36,41 +36,27 @@ import SettingsModal from "./SettingsModal";
 import TrashIcon from "./TrashIcon";
 import { useFitAllMinZoom } from "./useFitAllZoom";
 
-// Runs started from a node, for as long as the page is open: the runner only
-// watches the open project's run state, so the picker keeps its own note of
-// whose ▶ was pressed to show it still going when the person comes back here.
-const runningIds = new Set<string>();
-
-/** ▶ on a project node: run the whole project. */
-async function runProject(id: string): Promise<void> {
-  runningIds.add(id);
-  try {
-    await runProjectDir(id);
-  } finally {
-    runningIds.delete(id);
-  }
-}
-
-const isProjectRunning = (id: string) => runningIds.has(id);
-
-function stopProject(id: string): void {
-  stopProjectDir(id);
-  runningIds.delete(id);
-}
-
+const PROJECTS_CHANGED = "autoproject:projects-changed";
 type ProjectNodeType = Node<
-  { name: string; status: ProjectStatus; running: boolean; onDelete: () => void },
+  { name: string; status: ProjectStatus; onDelete: () => void },
   "project"
 >;
 
-// Dashes stacked per blue fade on a working node's border. A handful reads as
-// bands; this many reads as one soft fade at a 2px stroke.
-const FADE_STEPS = 80;
-
 function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
-  // The server's word on what is working, or the ▶ pressed here a moment ago
-  // that the server has not been asked about yet.
-  const working = data.status.working || data.running;
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function command(action: (id: string) => Promise<unknown> | void) {
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    try { await action(id); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally {
+      setPending(false);
+      window.dispatchEvent(new Event(PROJECTS_CHANGED));
+    }
+  }
+  const working = data.status.working || pending;
   const { review, blocked } = data.status;
   // Live work first, then work waiting on the person, then the odd board where
   // cards are stuck with nothing moving them. Published on the node for the
@@ -92,43 +78,10 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
         base ? " hover:border-violet-400" : ""
       }`}
     >
-      {/* Working: the border turns like the spinner beside the name. Blue and
-          yellow dashes chase each other when review is pending too; plain
-          working is six blue fades, built as ever narrower, darker dashes
-          stacked on a pale track (the arrays centre each dash on the same
-          spot). Strokes rather than a gradient so a segment keeps its length
-          along the short side, the long side and round the corners. The svg
-          spans the padding box, so the rects reach out a pixel to sit on the
-          (transparent) border ring. */}
       {working && (
         <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden>
           <rect className="project-turn-track" stroke={review ? "#facc15" : "#bfdbfe"} />
-          {review ? (
-            <rect className="project-turn-track project-turn-dash" stroke="#60a5fa" pathLength={100} />
-          ) : (
-            Array.from({ length: FADE_STEPS }, (_, i) => i + 1).map((k) => {
-              const period = 100 / 6;
-              // Half of each period stays solid blue, the primary colour; the
-              // other half dips to pale and back on a cosine, whose colour
-              // barely changes at either end, so no step there is wide enough
-              // to show as a tick.
-              const dash = period - (period / 2) * (Math.acos(1 - (2 * k) / FADE_STEPS) / Math.PI);
-              return (
-                <rect
-                  key={k}
-                  className="project-turn-track project-turn-dash"
-                  pathLength={100}
-                  style={{
-                    // Round ends blur each step's edge over a pixel, so the
-                    // steps blend rather than sit side by side.
-                    strokeLinecap: "round",
-                    stroke: `color-mix(in srgb, #60a5fa ${(k * 100) / FADE_STEPS}%, #bfdbfe)`,
-                    strokeDasharray: `${dash / 2} ${period - dash} ${dash / 2} 0`,
-                  }}
-                />
-              );
-            })
-          )}
+          <rect className="project-turn-track project-turn-dash" stroke="#60a5fa" pathLength={100} />
         </svg>
       )}
       {/* One row: name, then trash, then run/stop rightmost — a project is
@@ -156,7 +109,7 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
             <StopSquare
               onClick={(e) => {
                 e.stopPropagation();
-                stopProject(id);
+                void command(stopProjectDir);
               }}
             />
           </span>
@@ -164,7 +117,7 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
           <button
             onClick={(e) => {
               e.stopPropagation();
-              void runProject(id);
+              void command(runProjectDir);
             }}
             title="Run the whole project"
             className="text-sm leading-none text-emerald-600 hover:text-emerald-500"
@@ -173,6 +126,7 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
           </button>
         )}
       </div>
+      {error && <p role="alert" className="mt-1 text-xs text-red-600">{error}</p>}
       {/* dir=rtl puts the ellipsis on the left, keeping the end of the path
           visible; <bdi> keeps the LTR path itself from reordering */}
       <div dir="rtl" className="mt-2 truncate font-mono text-[10px] text-zinc-400" title={id}>
@@ -202,7 +156,10 @@ function ProjectModal({ onClose }: { onClose: () => void }) {
     try {
       const res = await fetch("/api/pick-folder", { method: "POST" });
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not open the folder picker");
       if (data.path) setImportPath(data.path);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setPicking(false);
     }
@@ -305,6 +262,7 @@ function DeleteModal({
 }) {
   const [busy, setBusy] = useState(false);
   const [confirmErase, setConfirmErase] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -317,8 +275,11 @@ function DeleteModal({
   async function del(mode: "hide" | "erase") {
     if (busy) return;
     setBusy(true);
-    await deleteProject(id, mode);
-    onDone();
+    setError(null);
+    setConfirmErase(false);
+    try { await deleteProject(id, mode); onDone(); }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setBusy(false); }
   }
 
   return (
@@ -331,6 +292,7 @@ function DeleteModal({
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-semibold">Remove “{name}”?</h2>
+        {error && <p role="alert" className="mt-2 text-sm text-red-600">{error}</p>}
         <div className="mt-4 flex items-center gap-2">
           <button
             className="mr-auto rounded-lg px-3 py-1.5 text-sm text-zinc-500 hover:bg-zinc-100"
@@ -372,6 +334,7 @@ function DeleteModal({
 export default function ProjectPicker() {
   const [nodes, setNodes] = useState<ProjectNodeType[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(
@@ -394,18 +357,20 @@ export default function ProjectPicker() {
   // Nodes are rebuilt from the rows, but a node already on the canvas keeps its
   // object (position, selection, a drag in progress) and only takes the new
   // name and status, since this also runs on a timer while the graph is up.
-  const refresh = useCallback(async () => {
-    const res = await fetch("/api/projects");
-    if (!res.ok) return;
+  const refresh = useCallback(async (signal: AbortSignal) => {
+    const res = await fetch("/api/projects", { signal });
+    if (!res.ok) throw new Error("Could not load projects");
     const rows: {
       id: string;
       name: string;
       status: ProjectStatus;
       metaPosition?: { x: number; y: number };
     }[] = (await res.json()).projects;
-    setNodes((nds) =>
-      rows.map((r, i) => {
-        const prev = nds.find((n) => n.id === r.id);
+    if (signal.aborted) return;
+    setNodes((nds) => {
+      const previous = new Map(nds.map((n) => [n.id, n]));
+      const next = rows.map((r, i) => {
+        const prev = previous.get(r.id);
         if (!prev)
           return {
             id: r.id,
@@ -414,7 +379,6 @@ export default function ProjectPicker() {
             data: {
               name: r.name,
               status: r.status,
-              running: isProjectRunning(r.id),
               onDelete: () => setPendingDelete({ id: r.id, name: r.name }),
             },
           };
@@ -424,40 +388,51 @@ export default function ProjectPicker() {
           d.status.working === r.status.working &&
           d.status.review === r.status.review &&
           d.status.blocked === r.status.blocked;
-        return same ? prev : { ...prev, data: { ...d, name: r.name, status: r.status } };
-      })
-    );
+        return same ? prev : { ...prev, data: { ...d, name: r.name, status: r.status,
+          onDelete: () => setPendingDelete({ id: r.id, name: r.name }) } };
+      });
+      return next.length === nds.length && next.every((n, i) => n === nds[i]) ? nds : next;
+    });
+    setError(null);
     setLoaded(true);
   }, []);
 
+  // One request at a time, suspended in background tabs; schedule the next
+  // poll after completion so a slow server cannot accumulate requests.
   useEffect(() => {
-    void refresh();
+    let disposed = false;
+    let controller: AbortController | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      clearTimeout(timer);
+      if (disposed || document.hidden || controller) return;
+      controller = new AbortController();
+      try { await refresh(controller.signal); }
+      catch (err) {
+        if (!disposed && !controller.signal.aborted) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        controller = null;
+        if (!disposed && !document.hidden) timer = setTimeout(poll, 2000);
+      }
+    };
+    const visibility = () => {
+      clearTimeout(timer);
+      if (document.hidden) controller?.abort();
+      else void poll();
+    };
+    void poll();
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener(PROJECTS_CHANGED, poll);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      controller?.abort();
+      document.removeEventListener("visibilitychange", visibility);
+      window.removeEventListener(PROJECTS_CHANGED, poll);
+    };
   }, [refresh]);
-
-  // Status changes while the picker is open — a ticket finishing, the agent
-  // answering — happen on the server, so ask it again every so often.
-  useEffect(() => {
-    const iv = setInterval(() => void refresh(), 2000);
-    return () => clearInterval(iv);
-  }, [refresh]);
-
-  // Reflect an ongoing run (started from a node, still active after coming
-  // back to the picker) on its project node.
-  useEffect(() => {
-    const iv = setInterval(() => {
-      setNodes((nds) => {
-        let changed = false;
-        const next = nds.map((n) => {
-          const running = isProjectRunning(n.id);
-          if (running === n.data.running) return n;
-          changed = true;
-          return { ...n, data: { ...n.data, running } };
-        });
-        return changed ? next : nds;
-      });
-    }, 500);
-    return () => clearInterval(iv);
-  }, []);
 
   const onNodesChange = useCallback(
     (changes: NodeChange<ProjectNodeType>[]) =>
@@ -484,6 +459,7 @@ export default function ProjectPicker() {
           <GearIcon />
         </button>
       </header>
+      {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
       <div ref={areaRef} className="relative flex-1 min-h-0">
         {loaded && minZoom !== null ? (
           <ReactFlow
@@ -500,12 +476,12 @@ export default function ProjectPicker() {
             zoomOnDoubleClick={false}
             onMoveEnd={(_, viewport) => rememberViewport(META_GRAPH_KEY, viewport)}
             onNodesChange={onNodesChange}
-            onNodeDragStop={(_, node) => void saveMetaPosition(node.id, node.position)}
+            onNodeDragStop={(_, node) => void saveMetaPosition(node.id, node.position).catch((err) => setError(String(err)))}
             // A project is the outermost ticket, so opening one moves like
             // opening any other: its node grows into the whole view while the
             // fetch runs behind it.
             onNodeDoubleClick={(_, node) =>
-              void openProject(node.id, zoomIntoProject(node.id))
+              void openProject(node.id, zoomIntoProject(node.id)).catch((err) => setError(String(err)))
             }
           >
             <Background variant={BackgroundVariant.Dots} gap={24} color="#d4d4d8" />

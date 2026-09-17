@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { applyRunEdits, mergeRunState, runEdits } from "../lib/run-state.ts";
+import { mergeRunState } from "../lib/run-state.ts";
 import type { Project, Ticket } from "../lib/types.ts";
 
 /**
@@ -112,39 +112,4 @@ test("the conversation and the agent's session come from the server", () => {
   // Project-level user fields stay the browser's.
   assert.deepEqual(merged.notes, ["use pnpm"]);
   assert.equal(merged.description, "mine");
-});
-
-test("a Reopen travels as a status intent", () => {
-  const base = p([t({ id: "a", status: "done" }), t({ id: "b", status: "todo" })]);
-  const next = p([t({ id: "a", status: "todo" }), t({ id: "b", status: "todo" })]);
-  assert.deepEqual(runEdits(base, next), [{ id: "a", status: "todo" }]);
-  // A ticket the base never had is not an edit.
-  assert.deepEqual(runEdits(base, p([...next.tickets, t({ id: "c" })])), [
-    { id: "a", status: "todo" },
-  ]);
-});
-
-test("applying an intent stamps the change and skips a ticket a run owns", () => {
-  const before = Date.now();
-  const project = p([
-    t({ id: "a", status: "done", statusChangedAt: 1 }),
-    t({ id: "owned", status: "running", statusChangedAt: 1 }),
-  ]);
-  const edits = [
-    { id: "a", status: "todo" as const },
-    { id: "owned", status: "todo" as const },
-  ];
-  const next = applyRunEdits(project, edits, (id) => id === "owned");
-  const [a, owned] = next.tickets;
-  assert.equal(a.status, "todo");
-  assert.ok((a.statusChangedAt ?? 0) >= before);
-  assert.equal(owned.status, "running");
-  assert.equal(owned.statusChangedAt, 1);
-});
-
-test("an intent that changes nothing does not re-stamp the ticket", () => {
-  const project = p([t({ id: "a", status: "todo", statusChangedAt: 1 })]);
-  const next = applyRunEdits(project, [{ id: "a", status: "todo" }], () => false);
-  assert.deepEqual(next, project);
-  assert.equal(next.tickets[0].statusChangedAt, 1);
 });

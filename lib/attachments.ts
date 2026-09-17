@@ -21,7 +21,8 @@ export function writeAttachments(
     const buf = m[1]
       ? Buffer.from(m[2], "base64")
       : Buffer.from(decodeURIComponent(m[2]));
-    const p = path.join(dir, safe);
+    // These files belong to a runtime workspace, not the application bundle.
+    const p = path.join(/* turbopackIgnore: true */ dir, safe);
     fs.writeFileSync(p, buf);
     written.push(p);
   }

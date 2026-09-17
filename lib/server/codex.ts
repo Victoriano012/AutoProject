@@ -1,10 +1,7 @@
-import { spawn } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import readline from "node:readline";
 import { resumableSession, tagSession } from "../agent-session";
-import type { AgentEvent, AgentRequest } from "./agent";
+import { resolveReasoningEffort } from "../models";
+import type { AgentEvent, AgentRequest } from "./agent-types";
+import { createCliSession, parseStructured } from "./cli-process";
 
 interface CodexItem {
   id?: string;
@@ -32,7 +29,7 @@ interface CodexEvent {
 export function codexArgs(
   req: Pick<
     AgentRequest,
-    "model" | "sessionId" | "workspaceDir" | "writeAccess"
+    "model" | "sessionId" | "workspaceDir" | "writeAccess" | "reasoningEffort"
   >,
   schemaPath?: string
 ): string[] {
@@ -41,6 +38,8 @@ export function codexArgs(
   const args = ["exec"];
   if (resume) args.push("resume", resume.raw);
   args.push("--json", "--model", model, "--skip-git-repo-check");
+  const effort = resolveReasoningEffort(model, req.reasoningEffort);
+  if (effort) args.push("--config", `model_reasoning_effort="${effort}"`);
   if (schemaPath) args.push("--output-schema", schemaPath);
   if (req.writeAccess) args.push("--dangerously-bypass-approvals-and-sandbox");
   else if (!resume) args.push("--sandbox", "read-only");
@@ -74,81 +73,25 @@ function toolText(item: CodexItem): string | undefined {
   if (item.type === "plan") return "Update plan";
 }
 
-function parseStructured(text: string):
-  | { ok: true; value: unknown }
-  | { ok: false; message: string } {
-  try {
-    return { ok: true, value: JSON.parse(text) };
-  } catch (err) {
-    return {
-      ok: false,
-      message: `Codex returned invalid structured output: ${String(err)}`,
-    };
-  }
-}
-
 /** Codex's documented JSONL mode supplies session, progress, tool, and final
  * message events while auth stays entirely inside the local Codex CLI. */
 export async function* streamCodexAgent(
   req: AgentRequest
 ): AsyncGenerator<AgentEvent> {
-  let schemaDir: string | undefined;
-  let schemaPath: string | undefined;
-  if (req.outputSchema) {
-    schemaDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoproject-codex-schema-"));
-    schemaPath = path.join(schemaDir, "schema.json");
-    fs.writeFileSync(schemaPath, JSON.stringify(req.outputSchema));
-  }
-
-  const executable = process.env.AUTOPROJECT_CODEX_PATH?.trim() || "codex";
-  const child = spawn(/* turbopackIgnore: true */ executable, codexArgs(req, schemaPath), {
-    cwd: req.workspaceDir,
-    env: process.env,
-    stdio: ["pipe", "pipe", "pipe"],
+  if (req.signal.aborted) { yield { type: "error", message: "Agent stopped" }; return; }
+  const cli = await createCliSession(req, {
+    label: "Codex",
+    executable: process.env.AUTOPROJECT_CODEX_PATH?.trim() || "codex",
+    args: (schemaPath) => codexArgs(req, schemaPath),
+    stdin: req.prompt,
   });
-
-  let spawnError: Error | undefined;
-  let stderr = "";
   let finalText = "";
   let resultSent = false;
   const seenTools = new Set<string>();
 
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr = (stderr + chunk).slice(-8000);
-  });
-  child.stdin.on("error", () => {});
-  child.stdin.end(req.prompt);
-
-  let killTimer: ReturnType<typeof setTimeout> | undefined;
-  const onAbort = () => {
-    child.kill("SIGINT");
-    killTimer = setTimeout(() => child.kill("SIGKILL"), 8000);
-    killTimer.unref?.();
-  };
-  if (req.signal.aborted) onAbort();
-  req.signal.addEventListener("abort", onAbort);
-
-  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-    (resolve) => {
-      child.once("error", (err) => {
-        spawnError = err;
-        resolve({ code: null, signal: null });
-      });
-      child.once("close", (code, signal) => resolve({ code, signal }));
-    }
-  );
-
   try {
-    const lines = readline.createInterface({ input: child.stdout });
-    for await (const line of lines) {
-      if (!line.trim()) continue;
-      let event: CodexEvent;
-      try {
-        event = JSON.parse(line) as CodexEvent;
-      } catch {
-        continue;
-      }
+    for await (const raw of cli.events) {
+      const event = raw as CodexEvent;
 
       if (event.type === "thread.started" && event.thread_id) {
         yield {
@@ -182,7 +125,7 @@ export async function* streamCodexAgent(
           tokens: (event.usage?.input_tokens ?? 0) + (event.usage?.output_tokens ?? 0),
         };
         if (req.outputSchema) {
-          const parsed = parseStructured(finalText);
+          const parsed = parseStructured(finalText, "Codex");
           yield parsed.ok
             ? {
                 type: "result",
@@ -201,24 +144,11 @@ export async function* streamCodexAgent(
       }
     }
 
-    const status = await exit;
+    const status = await cli.exit;
     if (!resultSent) {
-      const detail = spawnError
-        ? spawnError.message
-        : req.signal.aborted
-          ? "Agent stopped"
-          : stderr.trim() ||
-            `Codex exited ${status.signal ? `with ${status.signal}` : `with code ${status.code}`}`;
-      yield {
-        type: "error",
-        message: spawnError?.message.includes("ENOENT")
-          ? "Codex CLI was not found. Install it, run `codex login`, and restart AutoProject."
-          : detail,
-      };
+      yield { type: "error", message: cli.failure(status, "Codex CLI was not found. Install it, run `codex login`, and restart AutoProject.") };
     }
   } finally {
-    req.signal.removeEventListener("abort", onAbort);
-    if (killTimer) clearTimeout(killTimer);
-    if (schemaDir) fs.rmSync(schemaDir, { recursive: true, force: true });
+    await cli.close();
   }
 }

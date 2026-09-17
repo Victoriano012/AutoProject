@@ -1,15 +1,90 @@
 #!/bin/bash
-# Launches AutoProject (starting the server if needed) and opens it in the browser.
-APP_DIR="$HOME/Documents/personal/AutoProject"
-PORT=4123
-URL="http://localhost:$PORT"
+# Start a local production server and open the app. --dev opts into hot reload.
+set -euo pipefail
 
-if ! curl -sf "$URL/api/projects" >/dev/null 2>&1; then
-  mkdir -p "$HOME/.autoproject"
-  (cd "$APP_DIR" && nohup npm run dev -- --port $PORT >> "$HOME/.autoproject/server.log" 2>&1 &)
-  for _ in $(seq 1 60); do
-    curl -sf "$URL/api/projects" >/dev/null 2>&1 && break
+usage() {
+  cat <<'HELP'
+Usage: autoproject [--dev] [--port PORT] [--no-open]
+
+Starts a production build on 127.0.0.1:4123, or reuses a server already there.
+  --dev       Start Next.js development mode instead of building for production.
+  --port      Override AUTOPROJECT_PORT (default 4123).
+  --no-open   Print the URL without opening a browser.
+
+AUTOPROJECT_START_TIMEOUT sets the readiness timeout in seconds (default 60).
+AUTOPROJECT_STATE_DIR sets the log directory (default ~/.autoproject).
+HELP
+}
+fail() { printf 'AutoProject: %s\n' "$*" >&2; exit 1; }
+
+launch_mode=start
+launch_open=true
+launch_port="${AUTOPROJECT_PORT:-4123}"
+launch_timeout="${AUTOPROJECT_START_TIMEOUT:-60}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dev) launch_mode=dev ;;
+    --no-open) launch_open=false ;;
+    --port) [ "$#" -ge 2 ] || fail '--port requires a number'; launch_port="$2"; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) fail "Unknown option: $1 (use --help)" ;;
+  esac
+  shift
+done
+[[ "$launch_port" =~ ^[0-9]{1,5}$ ]] || fail 'Port must be a number from 1 to 65535.'
+launch_port=$((10#$launch_port))
+[ "$launch_port" -ge 1 ] && [ "$launch_port" -le 65535 ] || fail 'Port must be a number from 1 to 65535.'
+[[ "$launch_timeout" =~ ^[1-9][0-9]{0,3}$ ]] || fail 'Readiness timeout must be 1–9999 seconds.'
+
+# Resolve symlinks so a launcher linked into ~/bin still finds its checkout.
+launch_source="${BASH_SOURCE[0]}"
+while [ -L "$launch_source" ]; do
+  launch_parent="$(cd -P "$(dirname "$launch_source")" && pwd)"
+  launch_source="$(readlink "$launch_source")"
+  [[ "$launch_source" = /* ]] || launch_source="$launch_parent/$launch_source"
+done
+launch_app_dir="$(cd -P "$(dirname "$launch_source")/.." && pwd)"
+launch_state_dir="${AUTOPROJECT_STATE_DIR:-$HOME/.autoproject}"
+launch_log="$launch_state_dir/server.log"
+launch_url="http://127.0.0.1:$launch_port"
+command -v curl >/dev/null || fail 'curl is required.'
+ready() { curl --fail --silent --max-time 2 "$launch_url/api/projects" >/dev/null 2>&1; }
+
+if ! ready; then
+  command -v npm >/dev/null || fail 'npm is required. Install Node.js first.'
+  [ -f "$launch_app_dir/package.json" ] || fail "No package.json beside the launcher: $launch_app_dir"
+  [ -d "$launch_app_dir/node_modules/next" ] || fail "Dependencies are missing. Run npm install in $launch_app_dir."
+  mkdir -p "$launch_state_dir"
+  if [ "$launch_mode" = start ]; then
+    printf 'Building AutoProject for production…\n'
+    if ! (cd "$launch_app_dir" && npm run build >>"$launch_log" 2>&1); then
+      tail -n 20 "$launch_log" >&2
+      fail "Build failed. Full output: $launch_log"
+    fi
+  fi
+  (cd "$launch_app_dir" && exec nohup npm run "$launch_mode" -- --hostname 127.0.0.1 --port "$launch_port" </dev/null >>"$launch_log" 2>&1) &
+  launch_pid=$!
+  launch_deadline=$((SECONDS + launch_timeout))
+  until ready; do
+    if ! kill -0 "$launch_pid" 2>/dev/null; then
+      tail -n 20 "$launch_log" >&2
+      fail "Server exited before becoming ready. Full output: $launch_log"
+    fi
+    [ "$SECONDS" -lt "$launch_deadline" ] || fail "Server was not ready after ${launch_timeout}s. Inspect $launch_log."
     sleep 0.5
   done
 fi
-open "$URL"
+
+printf '%s\n' "$launch_url"
+if [ "$launch_open" = true ]; then
+  case "$(uname -s)" in
+    Darwin) open "$launch_url" || fail "Could not open the browser. Open $launch_url manually." ;;
+    *)
+      if command -v xdg-open >/dev/null; then
+        xdg-open "$launch_url" >/dev/null 2>&1 || fail "Could not open the browser. Open $launch_url manually."
+      else
+        printf 'Open the URL above in your browser.\n'
+      fi
+      ;;
+  esac
+fi

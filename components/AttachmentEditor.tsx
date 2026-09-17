@@ -1,8 +1,9 @@
 "use client";
 
+import { useState } from "react";
 import { Attachment } from "@/lib/types";
 
-const MAX_SIZE = 3 * 1024 * 1024; // stored in localStorage — keep files small
+const MAX_SIZE = 3 * 1024 * 1024; // Limit request size and keep project context manageable
 
 /** Appends files to `existing`, skipping oversized ones (with an alert). */
 export async function addFiles(
@@ -13,7 +14,7 @@ export async function addFiles(
   const next = [...existing];
   for (const f of Array.from(list)) {
     if (f.size > MAX_SIZE) {
-      alert(`"${f.name}" is over 3 MB — attachments are stored in the browser, keep them small.`);
+      alert(`"${f.name}" is over 3 MB — choose a smaller file.`);
       continue;
     }
     next.push(await fileToAttachment(f));
@@ -45,8 +46,15 @@ export default function AttachmentEditor({
   onChange: (attachments: Attachment[]) => void;
   label?: string;
 }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   async function add(list: FileList | null) {
-    onChange(await addFiles(attachments, list));
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try { onChange(await addFiles(attachments, list)); }
+    catch (err) { setError(err instanceof Error ? err.message : "Could not read this file"); }
+    finally { setBusy(false); }
   }
 
   return (
@@ -57,6 +65,7 @@ export default function AttachmentEditor({
           <span className="text-sm leading-none">＋</span> Add file
           <input
             type="file"
+            disabled={busy}
             multiple
             className="hidden"
             onChange={(e) => {
@@ -66,12 +75,14 @@ export default function AttachmentEditor({
           />
         </label>
       </div>
+      {error && <p role="alert" className="mt-1 text-red-600">{error}</p>}
       {attachments.map((a) => (
         <div key={a.id} className="mt-1 flex items-center gap-2">
           <span className="min-w-0 truncate text-zinc-700">📎 {a.name}</span>
           <button
             className="shrink-0 text-zinc-400 hover:text-red-500"
             title="Remove"
+            disabled={busy}
             onClick={() => onChange(attachments.filter((x) => x.id !== a.id))}
           >
             ✕

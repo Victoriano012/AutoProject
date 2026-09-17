@@ -1,7 +1,8 @@
 "use client";
 
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { LogEntry } from "@/lib/types";
+import TranscriptDownload from "./TranscriptDownload";
 
 /**
  * An agent transcript: the card's log, shown on the card the person pressed,
@@ -14,13 +15,16 @@ import { LogEntry } from "@/lib/types";
  * the person has scrolled up to read, which stops the following until they
  * come back to the bottom.
  */
-export function LogView({ entries: log }: { entries: LogEntry[] }) {
+export function LogView({ entries: log, ticketId }: { entries: LogEntry[]; ticketId?: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  const [pageEnd, setPageEnd] = useState<number | null>(null);
+  const end = Math.min(pageEnd ?? log.length, log.length);
+  const start = Math.max(0, end - 200);
   useLayoutEffect(() => {
     const el = ref.current;
     if (el && pinned.current) el.scrollTop = el.scrollHeight;
-  }, [log.length]);
+  }, [log, pageEnd]);
 
   if (log.length === 0) {
     return (
@@ -30,6 +34,8 @@ export function LogView({ entries: log }: { entries: LogEntry[] }) {
     );
   }
   return (
+    <>
+    <TranscriptDownload ticketId={ticketId} />
     <div
       ref={ref}
       // Reading and scrolling the log is not a press on the card: dragging its
@@ -41,7 +47,13 @@ export function LogView({ entries: log }: { entries: LogEntry[] }) {
       }}
       className="mt-2 h-32 space-y-1 overflow-y-auto overscroll-contain text-[11px] leading-snug"
     >
-      {log.map((e, i) => {
+      {start > 0 && <button className="text-violet-600" onClick={() => {
+        pinned.current = false;
+        setPageEnd(Math.max(200, start));
+        if (ref.current) ref.current.scrollTop = 0;
+      }}>Show earlier entries ({start} older)</button>}
+      {log.slice(start, end).map((e, index) => {
+        const i = start + index;
         switch (e.kind) {
           case "tool":
             return (
@@ -84,6 +96,17 @@ export function LogView({ entries: log }: { entries: LogEntry[] }) {
             );
         }
       })}
+      {end < log.length && <button className="text-violet-600" onClick={() => {
+        const next = Math.min(log.length, end + 200);
+        pinned.current = next === log.length;
+        setPageEnd(next === log.length ? null : next);
+        if (ref.current) ref.current.scrollTop = 0;
+      }}>Show newer entries ({log.length - end} newer)</button>}
+      {pageEnd !== null && <button className="ml-2 text-violet-600" onClick={() => {
+        pinned.current = true;
+        setPageEnd(null);
+      }}>Jump to latest</button>}
     </div>
+    </>
   );
 }

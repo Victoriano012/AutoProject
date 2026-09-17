@@ -1,4 +1,4 @@
-import { getProject, ProjectEvent, subscribe } from "@/lib/server/project-store";
+import { getProject, persistenceStatus, type ProjectEvent, subscribe } from "@/lib/server/project-store";
 import * as runs from "@/lib/server/runs";
 
 export const dynamic = "force-dynamic";
@@ -24,7 +24,7 @@ export async function GET(req: Request) {
         try {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
         } catch {
-          open = false;
+          cleanup();
         }
       };
       // Snapshot and subscription in the same tick, so no event slips between.
@@ -47,7 +47,11 @@ export async function GET(req: Request) {
           // already closed
         }
       };
-      req.signal.addEventListener("abort", cleanup);
+      const release = cleanup;
+      cleanup = () => { req.signal.removeEventListener("abort", cleanup); release(); };
+      req.signal.addEventListener("abort", cleanup, { once: true });
+      if (req.signal.aborted) cleanup();
+      else send({ type: "persistence", error: persistenceStatus(dir) });
     },
     cancel() {
       cleanup();

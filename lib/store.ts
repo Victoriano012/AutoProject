@@ -1,11 +1,18 @@
 "use client";
 
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
-import { ChatEntry, defaultProject, LogEntry, Mode, Project, Ticket } from "./types";
+import { createJSONStorage, persist } from "zustand/middleware";
+import { defaultProject, type ChatEntry, type LogEntry, type Mode, type Project, type Ticket } from "./types";
+import type { SaveState } from "./save-queue";
+import { CHAT_CAP, TICKET_LOG_CAP } from "./project-events";
 import { zoomOutOfProject } from "./view-zoom";
 
+const navigation = globalThis as unknown as { __autoprojectBeforeClose?: () => Promise<void> };
+export function setBeforeProjectClose(fn: () => Promise<void>) { navigation.__autoprojectBeforeClose = fn; }
+
 interface AppState {
+  saveState: SaveState;
+  setSaveState: (state: SaveState) => void;
   /** Server id of the open project; null = show the project picker. */
   projectId: string | null;
   /** True once the open project's data has been fetched from the server. */
@@ -32,9 +39,11 @@ interface AppState {
   setNotes: (notes: string[]) => void;
 }
 
-const freshStore = create<AppState>()(
+const createAppStore = () => create<AppState>()(
   persist(
     (set, get) => ({
+      saveState: { status: "saved" },
+      setSaveState: (saveState) => set({ saveState }),
       projectId: null,
       projectLoaded: false,
       project: defaultProject("Untitled project"),
@@ -60,9 +69,12 @@ const freshStore = create<AppState>()(
       // rather than run here.
       closeProject: () => {
         const s = get();
-        zoomOutOfProject(s.projectId, 0, false, () =>
-          set({ projectId: null, projectLoaded: false, selectedId: null, mode: "panel" })
-        );
+        void (navigation.__autoprojectBeforeClose?.() ?? Promise.resolve()).then(() => {
+          if (get().projectId !== s.projectId) return;
+          zoomOutOfProject(s.projectId, 0, false, () =>
+            set({ projectId: null, projectLoaded: false, selectedId: null, mode: "panel" })
+          );
+        }).catch((error) => set({ saveState: { status: "error", error: error instanceof Error ? error.message : "Could not save changes" } }));
       },
       setProject: (p) => set((s) => ({ project: { ...s.project, ...p } })),
       select: (id) => set({ selectedId: id }),
@@ -84,13 +96,13 @@ const freshStore = create<AppState>()(
           project: {
             ...s.project,
             tickets: s.project.tickets.map((t) =>
-              t.id === id ? { ...t, log: [...t.log, entry] } : t
+              t.id === id ? { ...t, log: [...t.log, entry].slice(-TICKET_LOG_CAP) } : t
             ),
           },
         })),
 
       appendChat: (entries) =>
-        set((s) => ({ project: { ...s.project, chat: [...s.project.chat, ...entries] } })),
+        set((s) => ({ project: { ...s.project, chat: [...s.project.chat, ...entries].slice(-CHAT_CAP) } })),
 
       // A ticket the browser already has (its own optimistic copy, or a replayed
       // event) is replaced rather than duplicated.
@@ -118,6 +130,14 @@ const freshStore = create<AppState>()(
     }),
     {
       name: "autoproject-project",
+      storage: createJSONStorage(() => {
+        let previous: string | null = null;
+        return {
+          getItem: (key) => localStorage.getItem(key),
+          setItem: (key, value) => { if (value !== previous) { localStorage.setItem(key, value); previous = value; } },
+          removeItem: (key) => { localStorage.removeItem(key); previous = null; },
+        };
+      }),
       // Project data lives on the server; only remember which project is open
       // and which card was pressed — `openProject` re-validates that against
       // the tickets it fetches before restoring it.
@@ -142,6 +162,6 @@ const freshStore = create<AppState>()(
 const win =
   typeof window === "undefined"
     ? null
-    : (window as unknown as { __autoprojectStore?: typeof freshStore });
-export const useStore = win?.__autoprojectStore ?? freshStore;
+    : (window as unknown as { __autoprojectStore?: ReturnType<typeof createAppStore> });
+export const useStore = win?.__autoprojectStore ?? createAppStore();
 if (win) win.__autoprojectStore = useStore;

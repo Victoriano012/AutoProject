@@ -1,10 +1,10 @@
-import { readProject, writeProject } from "../projects-fs";
+import { readProject, writeProjectAsync } from "../projects-fs";
+import { CHAT_CAP, TICKET_LOG_CAP, type ProjectEvent } from "../project-events";
+import { appendHistory, historyRecord, initialHistory, type HistoryRecord } from "./project-history";
+export type { ProjectEvent } from "../project-events";
 import type {
-  AgentRequest,
   ChatEntry,
-  LiveSubagent,
   LogEntry,
-  Mode,
   Project,
   Ticket,
   Worker,
@@ -19,30 +19,15 @@ import type {
  * client that connects a second later with no tab having been open.
  */
 
-/** What the live subscription carries to whichever clients are watching. */
-export type ProjectEvent =
-  | { type: "ticket"; id: string; patch: Partial<Ticket> }
-  | { type: "log"; id: string; entries: LogEntry[] }
-  /** Set changes made on the server (the project agent's tickets, deletions). */
-  | { type: "tickets"; added: Ticket[]; removed: string[] }
-  | { type: "chat"; entries: ChatEntry[] }
-  /** The project agent's turn began or ended, or its request stack changed. */
-  | {
-      type: "agent";
-      busy: boolean;
-      mode: Mode | null;
-      requests: AgentRequest[];
-      subagents: LiveSubagent[];
-    }
-  | { type: "notes"; notes: string[] }
-  /** The whole list: a worker was added, or one's session moved on. */
-  | { type: "workers"; workers: Worker[] }
-  | { type: "runs" };
-
 interface Entry {
   project: Project;
   timer: ReturnType<typeof setTimeout> | null;
   listeners: Set<(e: ProjectEvent) => void>;
+  pending: HistoryRecord[];
+  writing: Promise<void> | null;
+  generation: number;
+  persisted: number;
+  error: string | null;
 }
 
 // Module state must survive dev hot-reloads, or a recompile would orphan every
@@ -58,12 +43,23 @@ function entry(dir: string): Entry | null {
   const found = entries.get(dir);
   // The map outlives hot reloads, so it can still hold a project loaded by the
   // graph-era (or pre-worker) code; only a fresh read runs the on-disk migration.
-  if (found && Array.isArray(found.project.tickets) && Array.isArray(found.project.workers))
+  if (found && Array.isArray(found.project.tickets) && Array.isArray(found.project.workers)) {
+    // State survives hot reloads from earlier store versions as well.
+    found.pending ??= initialHistory(found.project, dir);
+    found.writing ??= null;
+    found.generation ??= 0;
+    found.persisted ??= -1;
+    found.error ??= null;
     return found;
+  }
   if (found?.timer) clearTimeout(found.timer);
   const project = readProject(dir);
   if (!project) return null;
-  const fresh: Entry = { project, timer: null, listeners: found?.listeners ?? new Set() };
+  const fresh: Entry = {
+    project: { ...project, chat: project.chat.slice(-CHAT_CAP), tickets: project.tickets.map((ticket) => ({ ...ticket, log: ticket.log.slice(-TICKET_LOG_CAP) })) },
+    timer: null, listeners: found?.listeners ?? new Set(), pending: initialHistory(project, dir),
+    writing: null, generation: 0, persisted: -1, error: null,
+  };
   entries.set(dir, fresh);
   return fresh;
 }
@@ -92,18 +88,31 @@ export function publish(dir: string, event: ProjectEvent): void {
   for (const fn of [...e.listeners]) fn(event);
 }
 
+function persistenceError(dir: string, e: Entry, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`Unable to persist project ${dir}: ${message}`);
+  if (e.error !== message) {
+    e.error = message;
+    publish(dir, { type: "persistence", error: message });
+  }
+}
+
 function scheduleWrite(dir: string, e: Entry): void {
+  e.generation++;
   if (e.timer) return;
   e.timer = setTimeout(() => {
     e.timer = null;
-    try {
-      writeProject(dir, e.project);
-    } catch {
-      // The folder can vanish under us; nothing useful to do here.
-    }
+    void flush(dir).catch(() => {
+      // Keep the dirty generation and journal pending. A subsequent flush or
+      // edit retries it; clients receive a persistence event instead of success.
+    });
   }, WRITE_DEBOUNCE_MS);
-  // Never keep the process alive just to flush.
-  e.timer.unref?.();
+  // A pending durable write must finish before normal process exit.
+}
+
+/** Latest background failure, also available to reconnecting clients. */
+export function persistenceStatus(dir: string): string | null {
+  return entry(dir)?.error ?? null;
 }
 
 /** Replace the whole project (a client's autosave, already merged). */
@@ -139,6 +148,7 @@ export function updateTicket(dir: string, id: string, fn: (t: Ticket) => Ticket)
   scheduleWrite(dir, e);
 
   const patch: Partial<Ticket> = {};
+  const unset: (keyof Ticket)[] = [];
   if (was.status !== now.status) {
     patch.status = now.status;
     patch.statusChangedAt = now.statusChangedAt;
@@ -150,16 +160,22 @@ export function updateTicket(dir: string, id: string, fn: (t: Ticket) => Ticket)
   // the open board this way: without it the card sits in Working saying Queued
   // while the scheduler has quietly parked it.
   if (was.paused !== now.paused) patch.paused = now.paused;
-  if (Object.keys(patch).length > 0) publish(dir, { type: "ticket", id, patch });
+  for (const key of Object.keys(patch) as (keyof Ticket)[]) {
+    if (patch[key] === undefined) { unset.push(key); delete patch[key]; }
+  }
+  if (Object.keys(patch).length > 0 || unset.length) {
+    publish(dir, { type: "ticket", id, patch, ...(unset.length ? { unset } : {}) });
+  }
 }
 
 export function appendLog(dir: string, id: string, entryToAdd: LogEntry): void {
   const e = entry(dir);
-  if (!e) return;
+  if (!e || !e.project.tickets.some((ticket) => ticket.id === id)) return;
+  e.pending.push(historyRecord(entryToAdd, id));
   e.project = {
     ...e.project,
     tickets: e.project.tickets.map((t) =>
-      t.id === id ? { ...t, log: [...t.log, entryToAdd] } : t
+      t.id === id ? { ...t, log: [...t.log, entryToAdd].slice(-TICKET_LOG_CAP) } : t
     ),
   };
   scheduleWrite(dir, e);
@@ -241,11 +257,11 @@ export function removeTickets(dir: string, ids: string[]): void {
 
 /** The transcript is bounded: a long act session would otherwise grow
  * project.json (and every snapshot) without limit. */
-const CHAT_CAP = 2000;
 
 export function appendChat(dir: string, entries: ChatEntry[]): void {
   const e = entry(dir);
   if (!e || entries.length === 0) return;
+  e.pending.push(...entries.map((item) => historyRecord(item)));
   const chat = [...e.project.chat, ...entries];
   e.project = { ...e.project, chat: chat.slice(Math.max(0, chat.length - CHAT_CAP)) };
   scheduleWrite(dir, e);
@@ -257,6 +273,7 @@ export function setAgentSession(dir: string, sessionId: string | undefined): voi
   if (!e || e.project.agentSessionId === sessionId) return;
   e.project = { ...e.project, agentSessionId: sessionId };
   scheduleWrite(dir, e);
+  publish(dir, { type: "agent-session", sessionId: sessionId ?? null });
 }
 
 export function setNotes(dir: string, notes: string[]): void {
@@ -267,21 +284,52 @@ export function setNotes(dir: string, notes: string[]): void {
   publish(dir, { type: "notes", notes });
 }
 
-/** Write pending changes to disk now (tests and shutdown paths). */
-export function flush(dir: string): void {
+/** Persist every change queued before/during this call. Writes for one project
+ * never overlap, failures remain dirty, and callers only acknowledge after the
+ * journal and atomic snapshot have both reached disk. */
+export async function flush(dir: string): Promise<void> {
   const e = entries.get(dir);
   if (!e) return;
   if (e.timer) clearTimeout(e.timer);
   e.timer = null;
-  try {
-    writeProject(dir, e.project);
-  } catch {
-    // ignored — see scheduleWrite
+  if (e.writing) {
+    await e.writing;
+    if (e.persisted < e.generation) await flush(dir);
+    return;
   }
+  if (e.persisted === e.generation) return;
+  const writing = (async () => {
+    while (e.persisted < e.generation) {
+      const generation = e.generation;
+      const project = e.project;
+      const pending = e.pending.slice();
+      try {
+        await appendHistory(dir, pending);
+        // The journal is already durable even if the snapshot write fails.
+        // Retrying the snapshot must not append these records a second time.
+        e.pending.splice(0, pending.length);
+        await writeProjectAsync(dir, project);
+        e.persisted = generation;
+        if (e.error) { e.error = null; publish(dir, { type: "persistence", error: null }); }
+      } catch (error) { persistenceError(dir, e, error); throw error; }
+    }
+  })();
+  e.writing = writing;
+  try { await writing; } finally { if (e.writing === writing) e.writing = null; }
 }
 
-/** Drop a project from memory (tests; simulating a server restart). */
-export function forget(dir: string): void {
-  flush(dir);
+/** Drop only after durable writes finish, so deletion cannot race a timer that
+ * recreates its workspace. Run owners must first stop and await their tasks. */
+export async function forget(dir: string): Promise<void> {
+  await flush(dir);
+  discard(dir);
+}
+
+/** Drop an idle entry after a successful flush, or deliberately discard it in
+ * failure cleanup. Never use this to stop a live project. */
+export function discard(dir: string): void {
+  const e = entries.get(dir);
+  if (e?.writing) throw new Error("Cannot discard a project while it is being saved");
+  if (e?.timer) clearTimeout(e.timer);
   entries.delete(dir);
 }

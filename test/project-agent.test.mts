@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { z } from "zod";
@@ -111,8 +114,7 @@ test("messages queue behind a running turn, in order, and cancelling drops one",
   const { registry, runState } = await import("../lib/server/runs.ts");
   const { cancelRequest, sendToAgent } = await import("../lib/server/project-agent.ts");
   const { defaultProject } = await import("../lib/types.ts");
-  const dir =
-    "/private/tmp/claude-501/-Users-victor-Documents-personal-AutoProject/4fe223bd-0cee-4edf-931c-01648c66e1ed/scratchpad/agent-queue";
+  const dir = mkdtempSync(join(tmpdir(), "autoproject-agent-"));
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   writeProject(dir, defaultProject("Queue", dir));
@@ -140,7 +142,7 @@ test("messages queue behind a running turn, in order, and cancelling drops one",
     unsubscribe();
     registry.agents.delete(dir);
     registry.requests.delete(dir);
-    store.forget(dir);
+    await store.forget(dir);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -152,8 +154,7 @@ test("a chat message reaches a running chat turn at once; otherwise it waits lik
   const { registry, runState } = await import("../lib/server/runs.ts");
   const { sendToAgent } = await import("../lib/server/project-agent.ts");
   const { defaultProject } = await import("../lib/types.ts");
-  const dir =
-    "/private/tmp/claude-501/-Users-victor-Documents-personal-AutoProject/4fe223bd-0cee-4edf-931c-01648c66e1ed/scratchpad/agent-inject";
+  const dir = mkdtempSync(join(tmpdir(), "autoproject-agent-"));
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   writeProject(dir, defaultProject("Inject", dir));
@@ -190,7 +191,7 @@ test("a chat message reaches a running chat turn at once; otherwise it waits lik
     registry.agentMode.delete(dir);
     registry.inputs.delete(dir);
     registry.requests.delete(dir);
-    store.forget(dir);
+    await store.forget(dir);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

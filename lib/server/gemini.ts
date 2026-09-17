@@ -1,10 +1,7 @@
-import { spawn } from "node:child_process";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import readline from "node:readline";
 import { resumableSession, tagSession } from "../agent-session";
-import type { AgentEvent, AgentRequest } from "./agent";
+import { resolveReasoningEffort } from "../models";
+import type { AgentEvent, AgentRequest } from "./agent-types";
+import { createCliSession, parseStructured } from "./cli-process";
 
 interface AgyToolInfo {
   name?: string;
@@ -58,7 +55,7 @@ interface AgyEvent {
 export function geminiArgs(
   req: Pick<
     AgentRequest,
-    "model" | "sessionId" | "workspaceDir" | "writeAccess"
+    "model" | "sessionId" | "workspaceDir" | "writeAccess" | "reasoningEffort"
   >,
   schemaPath?: string
 ): string[] {
@@ -66,14 +63,10 @@ export function geminiArgs(
   const resume = resumableSession(req.sessionId, model);
   const args = ["--output-format", "stream-json"];
   if (resume) args.push("--conversation", resume.raw);
-  args.push("--model", model);
-  if (
-    !model.endsWith("-high") &&
-    !model.endsWith("-medium") &&
-    !model.endsWith("-low")
-  ) {
-    args.push("--effort", "high");
-  }
+  // Pin the actual variant: a saved '-high' slug must not override the slider.
+  const effort = resolveReasoningEffort(model, req.reasoningEffort);
+  const selectedModel = effort ? `${model.replace(/-(low|medium|high)$/, "")}-${effort}` : model;
+  args.push("--model", selectedModel);
   if (schemaPath) args.push("--json-schema", schemaPath);
   if (req.writeAccess) args.push("--dangerously-skip-permissions");
   return args;
@@ -117,87 +110,24 @@ function toolText(toolName?: string, toolInfo?: AgyToolInfo): string | undefined
   }
 }
 
-function parseStructured(text: string):
-  | { ok: true; value: unknown }
-  | { ok: false; message: string } {
-  try {
-    return { ok: true, value: JSON.parse(text) };
-  } catch (err) {
-    return {
-      ok: false,
-      message: `Gemini returned invalid structured output: ${String(err)}`,
-    };
-  }
-}
-
 /** Antigravity CLI's stream-json mode supplies session, progress, tool, and final
  * message events while auth stays inside the local CLI environment. */
 export async function* streamGeminiAgent(
   req: AgentRequest
 ): AsyncGenerator<AgentEvent> {
-  let schemaDir: string | undefined;
-  let schemaPath: string | undefined;
-  if (req.outputSchema) {
-    schemaDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoproject-gemini-schema-"));
-    schemaPath = path.join(schemaDir, "schema.json");
-    fs.writeFileSync(schemaPath, JSON.stringify(req.outputSchema));
-  }
-
-  const executable =
-    process.env.AUTOPROJECT_AGY_PATH?.trim() ||
-    process.env.AUTOPROJECT_GEMINI_PATH?.trim() ||
-    "agy";
-  const child = spawn(
-    /* turbopackIgnore: true */ executable,
-    [...geminiArgs(req, schemaPath), "--print", req.prompt],
-    {
-      cwd: req.workspaceDir,
-      env: process.env,
-      stdio: ["pipe", "pipe", "pipe"],
-    }
-  );
-
-  let spawnError: Error | undefined;
-  let stderr = "";
+  if (req.signal.aborted) { yield { type: "error", message: "Agent stopped" }; return; }
+  const cli = await createCliSession(req, {
+    label: "Gemini (agy)",
+    executable: process.env.AUTOPROJECT_AGY_PATH?.trim() || process.env.AUTOPROJECT_GEMINI_PATH?.trim() || "agy",
+    args: (schemaPath) => [...geminiArgs(req, schemaPath), "--print", req.prompt],
+  });
   let finalText = "";
   let resultSent = false;
   const seenTools = new Set<string>();
 
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr = (stderr + chunk).slice(-8000);
-  });
-  child.stdin.on("error", () => {});
-
-  let killTimer: ReturnType<typeof setTimeout> | undefined;
-  const onAbort = () => {
-    child.kill("SIGINT");
-    killTimer = setTimeout(() => child.kill("SIGKILL"), 8000);
-    killTimer.unref?.();
-  };
-  if (req.signal.aborted) onAbort();
-  req.signal.addEventListener("abort", onAbort);
-
-  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-    (resolve) => {
-      child.once("error", (err) => {
-        spawnError = err;
-        resolve({ code: null, signal: null });
-      });
-      child.once("close", (code, signal) => resolve({ code, signal }));
-    }
-  );
-
   try {
-    const lines = readline.createInterface({ input: child.stdout });
-    for await (const line of lines) {
-      if (!line.trim()) continue;
-      let event: AgyEvent;
-      try {
-        event = JSON.parse(line) as AgyEvent;
-      } catch {
-        continue;
-      }
+    for await (const raw of cli.events) {
+      const event = raw as AgyEvent;
 
       if (event.event === "init" && event.conversation_id) {
         yield {
@@ -238,7 +168,7 @@ export async function* streamGeminiAgent(
                 usage,
               };
             } else {
-              const parsed = parseStructured(responseText);
+              const parsed = parseStructured(responseText, "Gemini");
               yield parsed.ok
                 ? {
                     type: "result",
@@ -267,24 +197,11 @@ export async function* streamGeminiAgent(
       }
     }
 
-    const status = await exit;
+    const status = await cli.exit;
     if (!resultSent) {
-      const detail = spawnError
-        ? spawnError.message
-        : req.signal.aborted
-          ? "Agent stopped"
-          : stderr.trim() ||
-            `Gemini (agy) exited ${status.signal ? `with ${status.signal}` : `with code ${status.code}`}`;
-      yield {
-        type: "error",
-        message: spawnError?.message.includes("ENOENT")
-          ? "Antigravity CLI (agy) was not found. Install it, authenticate with your Gemini account, and restart AutoProject."
-          : detail,
-      };
+      yield { type: "error", message: cli.failure(status, "Antigravity CLI (agy) was not found. Install it, authenticate with your Gemini account, and restart AutoProject.") };
     }
   } finally {
-    req.signal.removeEventListener("abort", onAbort);
-    if (killTimer) clearTimeout(killTimer);
-    if (schemaDir) fs.rmSync(schemaDir, { recursive: true, force: true });
+    await cli.close();
   }
 }

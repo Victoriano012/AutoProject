@@ -7,6 +7,9 @@ import { registerHooks } from "node:module";
  */
 registerHooks({
   resolve(spec, ctx, next) {
+    if (spec.startsWith("@/")) {
+      return next(new URL(`../${spec.slice(2)}.ts`, import.meta.url).href, ctx);
+    }
     if (spec.startsWith(".") && !/\.[cm]?[jt]s$/.test(spec)) {
       try {
         return next(`${spec}.ts`, ctx);

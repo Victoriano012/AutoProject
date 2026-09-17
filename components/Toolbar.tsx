@@ -5,23 +5,27 @@ import {
   agentBusy,
   isProjectRunning,
   runProject,
-  stopAgent,
   stopProject,
   subscribeRuns,
 } from "@/lib/runner";
 import { useStore } from "@/lib/store";
+import { retrySave } from "@/lib/sync";
 import GearIcon from "./GearIcon";
 import { BoardIcon, ChatIcon, PlayIcon, Spinner, StopIcon } from "./icons";
 import Logo from "./Logo";
 import SettingsModal from "./SettingsModal";
 
 export default function Toolbar() {
-  const project = useStore((s) => s.project);
+  const name = useStore((s) => s.project.name);
+  const ticketCount = useStore((s) => s.project.tickets.length);
+  const saveState = useStore((s) => s.saveState);
   const closeProject = useStore((s) => s.closeProject);
   const setProject = useStore((s) => s.setProject);
   const mode = useStore((s) => s.mode);
   const toggleMode = useStore((s) => s.toggleMode);
 
+  const [error, setError] = useState<string | null>(null);
+  const report = (error: unknown) => setError(error instanceof Error ? error.message : "Request failed");
   const [showSettings, setShowSettings] = useState(false);
 
   // Pushed by the runner the moment the run starts or settles — a poll would
@@ -41,11 +45,18 @@ export default function Toolbar() {
       </button>
       <input
         className="bg-transparent text-2xl font-semibold outline-none rounded px-1 focus:bg-zinc-100 flex-1 min-w-40"
-        value={project.name}
+        value={name}
         onChange={(e) => setProject({ name: e.target.value })}
         aria-label="Project name"
       />
 
+      {(error || saveState.status === "error") && (
+        <div role="alert" className="max-w-sm text-xs text-red-700">
+          {error || saveState.error}
+          {saveState.status === "error" && <button className="ml-2 underline" onClick={() => { setError(null); void retrySave().catch(report); }}>Retry saving my edits</button>}
+        </div>
+      )}
+      {saveState.status === "pending" || saveState.status === "saving" ? <span className="text-xs text-zinc-500" role="status">Saving…</span> : null}
       <div className="ml-auto shrink-0 flex items-center gap-3">
         {/* Slot kept at icon size whether or not it holds the spinner, so the
             row doesn't shift when a run starts. */}
@@ -56,8 +67,8 @@ export default function Toolbar() {
           <button
             className="rounded-lg px-2 py-1.5 text-red-600 hover:bg-zinc-200 hover:text-red-500"
             onClick={() => {
-              if (runGoing) stopProject();
-              if (agentGoing) stopAgent();
+              setError(null);
+              void stopProject().catch(report);
             }}
             title={runGoing ? "Stop the run" : "Stop the agent"}
           >
@@ -66,8 +77,8 @@ export default function Toolbar() {
         ) : (
           <button
             className="rounded-lg px-2 py-1.5 text-emerald-600 hover:bg-zinc-200 hover:text-emerald-500 disabled:opacity-50"
-            onClick={() => void runProject()}
-            disabled={project.tickets.length === 0}
+            onClick={() => { setError(null); void runProject().catch(report); }}
+            disabled={ticketCount === 0}
             title="Run the project"
           >
             <PlayIcon />

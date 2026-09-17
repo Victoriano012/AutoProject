@@ -14,7 +14,7 @@ test("settings expose only the requested Codex and Gemini model families", () =>
     MODEL_CHOICES.filter((model) => model.provider === "codex").map(
       (model) => model.value
     ),
-    ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+    ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
   );
   assert.deepEqual(
     MODEL_CHOICES.filter((model) => model.provider === "gemini").map(
@@ -22,6 +22,7 @@ test("settings expose only the requested Codex and Gemini model families", () =>
     ),
     ["gemini-3.7-flash-high", "gemini-3.1-pro-high"]
   );
+  assert.equal(providerForModel("gpt-6-astra"), "codex");
   assert.equal(providerForModel("gpt-5.6-sol"), "codex");
   assert.equal(providerForModel("claude-sonnet-5"), "claude");
   assert.equal(providerForModel("gemini-3.7-flash-high"), "gemini");
@@ -71,6 +72,8 @@ test("new Codex work runs through the CLI with the selected model and workspace"
     "--model",
     "gpt-5.6-sol",
     "--skip-git-repo-check",
+    "--config",
+    'model_reasoning_effort="high"',
     "--dangerously-bypass-approvals-and-sandbox",
     "--cd",
     "/tmp/autoproject-test-workspace",
@@ -82,6 +85,7 @@ test("Codex planner resumes keep their thread and structured-output schema", () 
   const args = codexArgs(
     {
       model: "gpt-5.6-luna",
+      reasoningEffort: "max",
       sessionId: "codex:thread-456",
       workspaceDir: "/tmp/autoproject-test-workspace",
       writeAccess: false,
@@ -96,6 +100,8 @@ test("Codex planner resumes keep their thread and structured-output schema", () 
     "--model",
     "gpt-5.6-luna",
     "--skip-git-repo-check",
+    "--config",
+    'model_reasoning_effort="max"',
     "--output-schema",
     "/tmp/schema.json",
     "-",
@@ -121,6 +127,7 @@ test("Gemini planner resumes keep their conversation ID and structured-output sc
   const args = geminiArgs(
     {
       model: "gemini-3.1-pro-high",
+      reasoningEffort: "low",
       sessionId: "gemini:conv-456",
       workspaceDir: "/tmp/autoproject-test-workspace",
       writeAccess: false,
@@ -133,7 +140,7 @@ test("Gemini planner resumes keep their conversation ID and structured-output sc
     "--conversation",
     "conv-456",
     "--model",
-    "gemini-3.1-pro-high",
+    "gemini-3.1-pro-low",
     "--json-schema",
     "/tmp/schema.json",
   ]);
@@ -149,9 +156,6 @@ test("Gemini model without effort suffix defaults effort to high", () => {
     "--output-format",
     "stream-json",
     "--model",
-    "gemini-3.7-flash",
-    "--effort",
-    "high",
+    "gemini-3.7-flash-high",
   ]);
 });
-

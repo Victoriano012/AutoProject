@@ -1,3 +1,5 @@
+import { createBoardIndex } from "./board-index";
+
 export type TicketStatus = "todo" | "running" | "review" | "done" | "error";
 
 /** How the person is working with the project agent: planning tickets on the
@@ -114,6 +116,8 @@ export interface ChatEntry extends LogEntry {
 }
 
 export interface Project {
+  /** Revision of editable metadata; run/log events do not advance it. */
+  revision?: number;
   name: string;
   description: string;
   workspaceDir: string; // where the agent works; empty = server temp dir
@@ -131,6 +135,9 @@ export interface Project {
   /** The one project agent's session, resumed every turn in either mode. */
   agentSessionId?: string;
   chat: ChatEntry[];
+  /** Durable requests restored after the server restarts. */
+  pendingFeedback?: Record<string, string>;
+  agentRequests?: AgentRequest[];
 }
 
 export const defaultProject = (name: string, workspaceDir = ""): Project => ({
@@ -172,9 +179,6 @@ export function isTicketRunning(t: Ticket): boolean {
 export function isTicketWaiting(t: Ticket): boolean {
   return t.status === "review";
 }
-
-/** The same file named two ways ("./src/a.ts", "src/a.ts") is one file. */
-const normFile = (f: string) => f.trim().replace(/^\.?\//, "");
 
 /**
  * Why this ticket cannot start: another ticket is going to touch one of its
@@ -224,26 +228,7 @@ export function byArrival(a: Ticket, b: Ticket): number {
  * whatever else the ticket may also be waiting for.
  */
 export function fileHolders(tickets: Ticket[], ticketId: string): FileClaim[] {
-  const me = tickets.find((t) => t.id === ticketId);
-  if (!me) return [];
-  // A finished ticket wants nothing. A ticket in review still does: this is the
-  // question `sendFeedback` asks before putting its agent back to work, so it
-  // must answer for the ticket that is about to run, not the one sitting still.
-  if (isTicketDone(me)) return [];
-  const mine = new Set((me.files ?? []).map(normFile));
-  if (mine.size === 0) return [];
-  const out: FileClaim[] = [];
-  for (const o of tickets) {
-    if (o.id === ticketId || !o.files?.length) continue;
-    // One claim per ticket, not per file: three shared files are still one
-    // reason to wait. Sorted so both cards name the same one.
-    const files = [...new Set(o.files.map(normFile))].filter((f) => mine.has(f)).sort();
-    // Only a card in Working holds anything.
-    if (files.length && boardColumn(o) === "working") {
-      out.push({ file: files[0], files, by: o });
-    }
-  }
-  return out;
+  return createBoardIndex(tickets).fileHolders(ticketId);
 }
 
 /** Why this ticket is waiting on someone else's file — what a card shows. */
@@ -265,47 +250,25 @@ export function fileBlockedBy(
  * what a working card shows to say why the rest of the board is waiting. A
  * file nobody else wants is not listed: holding it costs no one anything. */
 export function fileBlockees(
-  tickets: Ticket[],
-  ticketId: string
+  tickets: Ticket[], ticketId: string
 ): { file: string; files: string[]; who: Ticket }[] {
-  const out: { file: string; files: string[]; who: Ticket }[] = [];
-  for (const o of tickets) {
-    // Only a card that is actually stuck is waiting: a card in review would
-    // wait if it went back to work, but nobody is held up on its behalf now.
-    if (o.id === ticketId || boardColumn(o) !== "blocked") continue;
-    for (const claim of fileClaims(tickets, o.id)) {
-      if (claim.by.id === ticketId) {
-        out.push({ file: claim.file, files: claim.files, who: o });
-      }
-    }
-  }
-  return out;
+  return createBoardIndex(tickets).fileBlockees(ticketId);
 }
 
 /** The card this ticket's own worker is still on, or null. One worker is one
  * conversation, so two of its tickets can no more run at once than two agents
  * can share a file — and the same rule applies: only a card in Working holds it. */
 export function workerBusyOn(tickets: Ticket[], ticketId: string): Ticket | null {
-  const me = tickets.find((t) => t.id === ticketId);
-  if (!me?.workerId) return null;
-  return (
-    tickets.find(
-      (o) => o.id !== ticketId && o.workerId === me.workerId && boardColumn(o) === "working"
-    ) ?? null
-  );
+  return createBoardIndex(tickets).workerBusyOn(ticketId);
 }
 
 /** True if running the project now could make progress somewhere. Paused,
  * file-blocked and worker-blocked tickets do not count: the scheduler will not
  * dispatch them. */
 export function hasRunnableWork(tickets: Ticket[]): boolean {
-  return tickets.some(
-    (t) =>
-      t.status === "todo" &&
-      !t.paused &&
-      !fileBlockedBy(tickets, t.id) &&
-      !workerBusyOn(tickets, t.id)
-  );
+  const index = createBoardIndex(tickets);
+  return tickets.some((t) => t.status === "todo" && !t.paused &&
+    index.fileHolders(t.id).length === 0 && !index.workerBusyOn(t.id));
 }
 
 /** The one thing only the running server knows, asked as a question so the
@@ -333,9 +296,10 @@ export function notReadyReason(
   if (facts?.stopped(t.id)) return "the person stopped it";
   // Never two agents in one file: a ticket whose files another unfinished
   // ticket is touching waits.
-  const claim = fileBlockedBy(tickets, t.id);
+  const index = createBoardIndex(tickets);
+  const claim = index.fileHolders(t.id)[0];
   if (claim) return `waiting for ${claim.file}, held by “${claim.by.title}”`;
-  const busy = workerBusyOn(tickets, t.id);
+  const busy = index.workerBusyOn(t.id);
   if (busy) return `waiting for its worker, still on “${busy.title}”`;
   return t.status === "todo" ? null : `its status is ${t.status}`;
 }

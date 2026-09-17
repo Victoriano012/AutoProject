@@ -29,73 +29,76 @@ export interface RunStateSnapshot {
   };
 }
 
-let state: RunStateSnapshot = {
-  loops: [],
-  active: [],
-  tickets: [],
-  agent: { busy: false, mode: null, requests: [], subagents: [] },
-};
-// Watchers of the run state (the toolbar, the bottom bar). Pushed, not polled.
-const runListeners = new Set<() => void>();
+const createClientRuntime = () => ({
+  state: { loops: [], active: [], tickets: [],
+    agent: { busy: false, mode: null, requests: [], subagents: [] } } as RunStateSnapshot,
+  stateVersion: 0,
+  commandSequence: 0,
+  listeners: new Set<() => void>(),
+  flushProject: async (): Promise<void> => {},
+  pokeStream: (): void => {},
+});
+const browser = typeof window === "undefined" ? null
+  : window as unknown as { __autoprojectRunner?: ReturnType<typeof createClientRuntime> };
+const runtime = browser?.__autoprojectRunner ?? createClientRuntime();
+if (browser) browser.__autoprojectRunner = runtime;
 
 /** Subscribe to run-state changes; returns the unsubscribe. */
 export function subscribeRuns(fn: () => void): () => void {
-  runListeners.add(fn);
+  runtime.listeners.add(fn);
   return () => {
-    runListeners.delete(fn);
+    runtime.listeners.delete(fn);
   };
 }
 
 export function notifyRuns(): void {
-  for (const fn of [...runListeners]) fn();
+  for (const fn of [...runtime.listeners]) fn();
 }
 
 /** Adopt the server's run state (the live subscription and every response). */
 export function applyRunState(next: RunStateSnapshot): void {
-  state = next;
+  runtime.state = next;
+  runtime.stateVersion++;
   notifyRuns();
 }
 
 /** True while the project's run is actually executing in the server: its
  * scheduler loop is draining work. */
 export function isProjectRunning(): boolean {
-  return state.loops.length > 0;
+  return runtime.state.loops.length > 0;
 }
 
 /** True while a live agent session is open on exactly this ticket. */
 export function isTicketRunLive(ticketId: string): boolean {
-  return state.tickets.includes(ticketId);
+  return runtime.state.tickets.includes(ticketId);
 }
 
 /** True while the project agent is mid-turn. */
 export function agentBusy(): boolean {
-  return state.agent.busy;
+  return runtime.state.agent.busy;
 }
 
 /** The project agent's stack: the request running, the ones waiting behind
  * it and any that failed, in the order they were sent. */
 export function agentRequests(): AgentRequest[] {
-  return state.agent.requests;
+  return runtime.state.agent.requests;
 }
 
 /** The subagents the project agent's turn has working for it right now. */
 export function agentSubagents(): LiveSubagent[] {
-  return state.agent.subagents;
+  return runtime.state.agent.subagents;
 }
-
-let flushProject: () => Promise<void> = async () => {};
-let pokeStream: () => void = () => {};
 
 /** sync.ts registers its feed check here: a person's action is the moment they
  * are watching for a result, so it is the moment to notice a dead feed. */
 export function setStreamPoke(fn: () => void): void {
-  pokeStream = fn;
+  runtime.pokeStream = fn;
 }
 
 /** sync.ts registers its autosave flush here: the server runs from its own copy
  * of the project, so pending edits go first. */
 export function setProjectFlush(fn: () => Promise<void>): void {
-  flushProject = fn;
+  runtime.flushProject = fn;
 }
 
 /** Fires an action at the server; false means it never got there. Only worth
@@ -103,57 +106,46 @@ export function setProjectFlush(fn: () => Promise<void>): void {
  * everything else goes through `call`, since a run's own progress comes back
  * through the live subscription regardless. `dir` defaults to the open project;
  * the project picker names one. */
-async function post(
-  action: string,
-  body: { ticketId?: string; ticketIds?: string[]; message?: string } = {},
-  dir: string | null = useStore.getState().projectId
-): Promise<boolean> {
-  if (!dir) return false;
-  pokeStream();
-  await flushProject();
-  try {
-    const res = await fetch("/api/runs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ dir, action, ...body }),
-    });
-    const data = (await res.json().catch(() => null)) as {
-      runs?: RunStateSnapshot;
-    } | null;
-    if (data?.runs) applyRunState(data.runs);
-    return res.ok;
-  } catch {
-    // The tab can go away mid-run; the run continues server-side and the live
-    // subscription carries whatever happened next.
-    return false;
-  }
-}
-
 async function call(
   action: string,
   body: { ticketId?: string; ticketIds?: string[]; message?: string } = {},
-  dir?: string
+  dir: string | null = useStore.getState().projectId
 ): Promise<void> {
-  await post(action, body, dir);
+  if (!dir) throw new Error("No project is open.");
+  runtime.pokeStream();
+  if (!action.startsWith("stop") && dir === useStore.getState().projectId) await runtime.flushProject();
+  const dispatchedVersion = runtime.stateVersion;
+  const sequence = ++runtime.commandSequence;
+  const res = await fetch("/api/runs", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dir, action, ...body }),
+  });
+  const data = await res.json().catch(() => null) as { dir?: string; runs?: RunStateSnapshot; error?: string } | null;
+  if (!res.ok) throw new Error(data?.error ?? `Request failed (${res.status})`);
+  if (data?.runs && data.dir === dir && useStore.getState().projectId === dir &&
+      runtime.stateVersion === dispatchedVersion && runtime.commandSequence === sequence) applyRunState(data.runs);
 }
 
-/** Run one ticket's agent. Resolves when the run settles server-side. */
+async function post(action: string, body: { ticketId?: string; message?: string }): Promise<boolean> {
+  try { await call(action, body); return true; } catch { return false; }
+}
+
+/** Run one ticket's agent. Resolves when the server accepts the request. */
 export function runTicket(ticketId: string): Promise<void> {
   return call("runTicket", { ticketId });
 }
 
-export function stopTicket(ticketId: string): void {
-  void call("stopTicket", { ticketId });
+export function stopTicket(ticketId: string): Promise<void> {
+  return call("stopTicket", { ticketId });
 }
 
-/** Run every ticket on the board, files permitting. Resolves when that
- * scheduler loop settles server-side. */
+/** Run every ticket on the board, files permitting. Resolves when the server accepts the request. */
 export function runProject(dir?: string): Promise<void> {
   return call("runProject", {}, dir);
 }
 
-export function stopProject(dir?: string): void {
-  void call("stopProject", {}, dir);
+export function stopProject(dir?: string): Promise<void> {
+  return call("stopProject", {}, dir);
 }
 
 /** Send human feedback into the ticket's existing agent session. */
@@ -176,8 +168,8 @@ export function noteTicket(ticketId: string, message: string): Promise<boolean> 
 }
 
 /** Approve a ticket in review (or force-complete any ticket). */
-export function approveTicket(ticketId: string): void {
-  void call("approveTicket", { ticketId });
+export function approveTicket(ticketId: string): Promise<void> {
+  return call("approveTicket", { ticketId });
 }
 
 /** Reject a ticket in review with feedback (the board's red cross). */
@@ -196,11 +188,10 @@ export function removeTickets(ticketIds: string[]): Promise<void> {
  * it already does this when it loads a project, which is what makes a stored
  * "running" trustworthy after a restart. */
 export function settleZombies(): void {
-  void call("settleZombies");
+  void call("settleZombies").catch(() => {});
 }
 
-async function agentAction(body: object): Promise<boolean> {
-  const dir = useStore.getState().projectId;
+async function agentAction(body: object, dir = useStore.getState().projectId): Promise<boolean> {
   if (!dir) return false;
   try {
     const res = await fetch("/api/agent", {
@@ -219,10 +210,10 @@ async function agentAction(body: object): Promise<boolean> {
  * subscription as chat entries; resolves false when the request never got
  * there. */
 export async function sendToAgent(mode: Mode, message: string): Promise<boolean> {
-  if (!useStore.getState().projectId) return false;
-  pokeStream();
-  await flushProject();
-  return agentAction({ action: "send", mode, message });
+  const dir = useStore.getState().projectId;
+  if (!dir) return false;
+  runtime.pokeStream();
+  try { await runtime.flushProject(); return await agentAction({ action: "send", mode, message }, dir); } catch { return false; }
 }
 
 /** Stop the turn in progress; the queue moves on. */

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import test from "node:test";
 import { readProject, writeProject } from "../lib/projects-fs.ts";
 import * as store from "../lib/server/project-store.ts";
@@ -13,8 +14,8 @@ import { defaultProject, newTicket, type Project } from "../lib/types.ts";
  * when either side of the conversation says something.
  */
 
-const SCRATCH =
-  "/private/tmp/claude-501/-Users-victor-Documents-personal-AutoProject/4fe223bd-0cee-4edf-931c-01648c66e1ed/scratchpad/store-events";
+const SCRATCH = fs.mkdtempSync(path.join(os.tmpdir(), "autoproject-store-"));
+test.after(() => fs.rmSync(SCRATCH, { recursive: true, force: true }));
 
 function scratchProject(name: string) {
   const dir = path.join(SCRATCH, name);
@@ -29,7 +30,7 @@ function scratchProject(name: string) {
   return { dir, events, unsubscribe };
 }
 
-test("a status change stamps statusChangedAt and publishes it", () => {
+test("a status change stamps statusChangedAt and publishes it", async () => {
   const { dir, events, unsubscribe } = scratchProject("status");
   try {
     const before = Date.now();
@@ -51,11 +52,11 @@ test("a status change stamps statusChangedAt and publishes it", () => {
     assert.equal(store.getProject(dir)!.tickets[0].statusChangedAt, e.patch.statusChangedAt);
   } finally {
     unsubscribe();
-    store.forget(dir);
+    await store.forget(dir);
   }
 });
 
-test("adding tickets publishes them, with ids, todo and stamped", () => {
+test("adding tickets publishes them, with ids, todo and stamped", async () => {
   const { dir, events, unsubscribe } = scratchProject("add");
   try {
     const before = Date.now();
@@ -86,7 +87,7 @@ test("adding tickets publishes them, with ids, todo and stamped", () => {
       store.getProject(dir)!.tickets.map((t) => t.title),
       ["A", "B", "C"]
     );
-    store.flush(dir);
+    await store.flush(dir);
     assert.equal(readProject(dir)!.tickets.length, 3);
 
     store.removeTickets(dir, [added[0].id]);
@@ -100,11 +101,11 @@ test("adding tickets publishes them, with ids, todo and stamped", () => {
     );
   } finally {
     unsubscribe();
-    store.forget(dir);
+    await store.forget(dir);
   }
 });
 
-test("the conversation publishes what was appended", () => {
+test("the conversation publishes what was appended", async () => {
   const { dir, events, unsubscribe } = scratchProject("chat");
   try {
     const entries = [
@@ -119,11 +120,11 @@ test("the conversation publishes what was appended", () => {
     assert.equal(events.length, 1);
   } finally {
     unsubscribe();
-    store.forget(dir);
+    await store.forget(dir);
   }
 });
 
-test("a planned ticket reuses the worker it names, or gets a new one", () => {
+test("a planned ticket reuses the worker it names, or gets a new one", async () => {
   const { dir, events, unsubscribe } = scratchProject("workers");
   try {
     const [b, c, d, e, f] = store.addTickets(dir, [
@@ -161,11 +162,11 @@ test("a planned ticket reuses the worker it names, or gets a new one", () => {
     assert.equal(store.getProject(dir)!.workers.length, 3);
   } finally {
     unsubscribe();
-    store.forget(dir);
+    await store.forget(dir);
   }
 });
 
-test("a project from before workers reads with an empty list", () => {
+test("a project from before workers reads with an empty list", async () => {
   const dir = path.join(SCRATCH, "migrate");
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(path.join(dir, ".autoproject"), { recursive: true });
