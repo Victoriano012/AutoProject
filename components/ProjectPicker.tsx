@@ -65,7 +65,7 @@ type ProjectNodeType = Node<
 
 // Dashes stacked per blue fade on a working node's border. A handful reads as
 // bands; this many reads as one soft fade at a 2px stroke.
-const FADE_STEPS = 40;
+const FADE_STEPS = 80;
 
 function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
   // The server's word on what is working, or the ▶ pressed here a moment ago
@@ -119,6 +119,9 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
                   className="project-turn-track project-turn-dash"
                   pathLength={100}
                   style={{
+                    // Round ends blur each step's edge over a pixel, so the
+                    // steps blend rather than sit side by side.
+                    strokeLinecap: "round",
                     stroke: `color-mix(in srgb, #60a5fa ${(k * 100) / FADE_STEPS}%, #bfdbfe)`,
                     strokeDasharray: `${dash / 2} ${period - dash} ${dash / 2} 0`,
                   }}
