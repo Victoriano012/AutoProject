@@ -136,3 +136,32 @@ body {
     transition: none;
   }
 }
+
+/* The turning border of a working project node (ProjectPicker): a solid
+   stroke on the frame with blue dashes sliding along it. pathLength on the
+   dashed one makes the dash units hundredths of the perimeter, so a dash is
+   the same length wherever it is, which a conic gradient cannot manage on a
+   rectangle. Geometry lives here rather than in attributes because the
+   frame's size is only known in CSS terms. */
+.project-turn-track {
+  x: -1px;
+  y: -1px;
+  rx: 11px;
+  width: calc(100% + 2px);
+  height: calc(100% + 2px);
+  fill: none;
+  stroke-width: 2px;
+}
+
+.project-turn-dash {
+  stroke-dasharray: 12.5 12.5;
+  animation: project-turn 6s linear infinite;
+}
+
+@keyframes project-turn {
+  to { stroke-dashoffset: -100; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-turn-dash { animation: none; }
+}
