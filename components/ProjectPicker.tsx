@@ -65,7 +65,7 @@ type ProjectNodeType = Node<
 
 // Dashes stacked per blue fade on a working node's border. A handful reads as
 // bands; this many reads as one soft fade at a 2px stroke.
-const FADE_STEPS = 16;
+const FADE_STEPS = 40;
 
 function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
   // The server's word on what is working, or the ▶ pressed here a moment ago
@@ -108,7 +108,9 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
           ) : (
             Array.from({ length: FADE_STEPS }, (_, i) => i + 1).map((k) => {
               const period = 100 / 6;
-              const dash = (period * (FADE_STEPS + 1 - k)) / (FADE_STEPS + 1);
+              // A cosine fade, not a linear one: the colour barely changes at
+              // either end, so no step there is wide enough to show as a tick.
+              const dash = (period * Math.acos((2 * k) / FADE_STEPS - 1)) / Math.PI;
               return (
                 <rect
                   key={k}
