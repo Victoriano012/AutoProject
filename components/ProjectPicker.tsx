@@ -72,9 +72,13 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
   // cards are stuck with nothing moving them. Published on the node for the
   // same reason as on a ticket: the flight box wants this colour, not the hover
   // one it would read off the node you necessarily hovered to click — and a
-  // single colour, so the turning look (an SVG below) goes as its blue.
+  // single colour, so the turning looks (below, and in globals.css) go as
+  // their blue. The plain working look paints its own white, since its
+  // gradient has to sit under it.
   const statusBorder = working
-    ? "border-transparent"
+    ? review
+      ? "border-transparent"
+      : "project-border-working"
     : review
       ? "border-yellow-400"
       : blocked
@@ -84,19 +88,18 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
   return (
     <div
       data-zoom-border={working ? "border-blue-400" : statusBorder}
-      className={`group relative w-64 rounded-xl border-2 bg-white p-3 pt-1.5 shadow-lg shadow-zinc-900/10 ${statusBorder}${
-        base ? " hover:border-violet-400" : ""
-      }`}
+      className={`group relative w-64 rounded-xl border-2 p-3 pt-1.5 shadow-lg shadow-zinc-900/10 ${statusBorder}${
+        statusBorder === "project-border-working" ? "" : " bg-white"
+      }${base ? " hover:border-violet-400" : ""}`}
     >
-      {/* Working: the border turns like the spinner beside the name — blue
-          dashes sliding round the frame over a solid track, yellow when review
-          is pending too. Strokes rather than a gradient so a dash keeps its
+      {/* Working with review pending: blue and yellow dashes chase each other
+          round the frame. Strokes rather than a gradient so a dash keeps its
           length along the short side, the long side and round the corners.
           The svg spans the padding box, so the rects reach out a pixel to sit
           on the (transparent) border ring. */}
-      {working && (
+      {working && review && (
         <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden>
-          <rect className="project-turn-track" stroke={review ? "#facc15" : "#bfdbfe"} />
+          <rect className="project-turn-track" stroke="#facc15" />
           <rect className="project-turn-track project-turn-dash" stroke="#60a5fa" pathLength={100} />
         </svg>
       )}

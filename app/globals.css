@@ -137,12 +137,36 @@ body {
   }
 }
 
-/* The turning border of a working project node (ProjectPicker): a solid
-   stroke on the frame with blue dashes sliding along it. pathLength on the
-   dashed one makes the dash units hundredths of the perimeter, so a dash is
-   the same length wherever it is, which a conic gradient cannot manage on a
-   rectangle. Geometry lives here rather than in attributes because the
-   frame's size is only known in CSS terms. */
+/* A working project node's border turns like the spinner beside its name:
+   a fade from blue to pale blue and back sweeping round the frame. A border is
+   one colour, so it is painted as backgrounds — white clipped to the padding
+   box over a conic gradient filling the border box — and the gradient's start
+   angle is what animates, which needs the registered property. */
+@property --project-turn {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes project-turn-sweep {
+  to { --project-turn: 360deg; }
+}
+
+.project-border-working {
+  --project-turn: 0deg;
+  border-color: transparent;
+  background:
+    linear-gradient(#fff, #fff) padding-box,
+    conic-gradient(from var(--project-turn), #60a5fa, #bfdbfe, #60a5fa) border-box;
+  animation: project-turn-sweep 9s linear infinite;
+}
+
+/* With review pending too (ProjectPicker): a solid yellow stroke on the frame
+   with blue dashes sliding along it. pathLength on the dashed one makes the
+   dash units hundredths of the perimeter, so a dash is the same length
+   wherever it is, which the conic gradient above cannot manage on a rectangle.
+   Geometry lives here rather than in attributes because the frame's size is
+   only known in CSS terms. */
 .project-turn-track {
   x: -1px;
   y: -1px;
@@ -154,8 +178,8 @@ body {
 }
 
 .project-turn-dash {
-  stroke-dasharray: 12.5 12.5;
-  animation: project-turn 6s linear infinite;
+  stroke-dasharray: 6.25 6.25;
+  animation: project-turn 9s linear infinite;
 }
 
 @keyframes project-turn {
@@ -163,5 +187,6 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .project-border-working,
   .project-turn-dash { animation: none; }
 }
