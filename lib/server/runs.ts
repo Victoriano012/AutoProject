@@ -447,7 +447,9 @@ export async function sendFeedback(
   dir: string,
   ticketId: string,
   message: string,
-  rejection = false
+  rejection = false,
+  // The message is already on the card's log, written when it was queued.
+  logged = false
 ): Promise<void> {
   const project = store.getProject(dir);
   const ticket = project?.tickets.find((t) => t.id === ticketId);
@@ -474,7 +476,11 @@ export async function sendFeedback(
     const key = ticketKey(dir, ticketId);
     const queued = registry.pendingFeedback.get(key);
     registry.pendingFeedback.set(key, queued ? `${queued}\n\n${message}` : message);
+    // The wait, then what waits: the card shows the person their own words
+    // under the reason nothing has happened to them yet. The wait line goes
+    // when the agent gets them (see runTicket).
     store.appendLog(dir, ticketId, { kind: "info", text: held, ts: Date.now() });
+    store.appendLog(dir, ticketId, { kind: "user", text: message, ts: Date.now() });
     store.updateTicket(dir, ticketId, (t) => ({ ...t, status: "todo" }));
     return;
   }
@@ -490,7 +496,9 @@ export async function sendFeedback(
   if (opening) {
     store.appendLog(dir, ticketId, { kind: "user", text: opening, ts: Date.now() });
   }
-  store.appendLog(dir, ticketId, { kind: "user", text: message, ts: Date.now() });
+  if (!logged) {
+    store.appendLog(dir, ticketId, { kind: "user", text: message, ts: Date.now() });
+  }
   store.updateTicket(dir, ticketId, (t) => ({ ...t, status: "running" }));
 
   const { ok, text, aborted } = await runWithNotes(dir, ticketId, {
@@ -550,12 +558,19 @@ export async function runTicket(dir: string, ticketId: string): Promise<void> {
     return;
   }
 
+  // Starting: the card is not waiting any more, so the lines saying it was
+  // (this function's and sendFeedback's) come off its log.
+  store.updateTicket(dir, ticketId, (t) => ({
+    ...t,
+    log: t.log.filter((e) => !(e.kind === "info" && e.text.startsWith("Waiting for "))),
+  }));
+
   // A message that arrived while the ticket's file or worker was taken: now
   // that it is free, the ticket goes back to its own agent with what the person said.
   const waiting = registry.pendingFeedback.get(key);
   if (waiting) {
     registry.pendingFeedback.delete(key);
-    await sendFeedback(dir, ticketId, waiting);
+    await sendFeedback(dir, ticketId, waiting, false, true);
     return;
   }
 
