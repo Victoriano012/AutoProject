@@ -138,7 +138,8 @@ body {
 }
 
 /* A working project node's border turns like the spinner beside its name:
-   a fade from blue to pale blue and back sweeping round the frame. A border is
+   six fades from blue to pale blue and back sweeping round the frame, since a
+   single slow one is too gentle to be seen moving. A border is
    one colour, so it is painted as backgrounds — white clipped to the padding
    box over a conic gradient filling the border box — and the gradient's start
    angle is what animates, which needs the registered property. */
@@ -157,7 +158,8 @@ body {
   border-color: transparent;
   background:
     linear-gradient(#fff, #fff) padding-box,
-    conic-gradient(from var(--project-turn), #60a5fa, #bfdbfe, #60a5fa) border-box;
+    repeating-conic-gradient(from var(--project-turn), #60a5fa, #bfdbfe 30deg, #60a5fa 60deg)
+      border-box;
   animation: project-turn-sweep 9s linear infinite;
 }
 
