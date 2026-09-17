@@ -16,6 +16,15 @@ export interface AgentRequest {
   error?: string;
 }
 
+/** A subagent the project agent has working for it right now (act mode), from
+ * its Agent tool call to that call's result. Lives in server memory only. */
+export interface LiveSubagent {
+  /** The tool_use id of the Agent call that started it. */
+  id: string;
+  description: string;
+  type?: string;
+}
+
 export interface Attachment {
   id: string;
   name: string;

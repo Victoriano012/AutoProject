@@ -1,7 +1,7 @@
 "use client";
 
 import { useStore } from "./store";
-import type { AgentRequest, Mode } from "./types";
+import type { AgentRequest, LiveSubagent, Mode } from "./types";
 
 /**
  * Runs execute in the server process, not in this tab: this module is the thin
@@ -19,16 +19,21 @@ export interface RunStateSnapshot {
   active: string[];
   /** Ids of tickets with a live agent session. */
   tickets: string[];
-  /** The project agent: mid-turn or idle, in which mode it was asked, and the
-   * requests it has running, waiting or failed. */
-  agent: { busy: boolean; mode: Mode | null; requests: AgentRequest[] };
+  /** The project agent: mid-turn or idle, in which mode it was asked, the
+   * requests it has running, waiting or failed, and the subagents at work. */
+  agent: {
+    busy: boolean;
+    mode: Mode | null;
+    requests: AgentRequest[];
+    subagents: LiveSubagent[];
+  };
 }
 
 let state: RunStateSnapshot = {
   loops: [],
   active: [],
   tickets: [],
-  agent: { busy: false, mode: null, requests: [] },
+  agent: { busy: false, mode: null, requests: [], subagents: [] },
 };
 // Watchers of the run state (the toolbar, the bottom bar). Pushed, not polled.
 const runListeners = new Set<() => void>();
@@ -71,6 +76,11 @@ export function agentBusy(): boolean {
  * it and any that failed, in the order they were sent. */
 export function agentRequests(): AgentRequest[] {
   return state.agent.requests;
+}
+
+/** The subagents the project agent's turn has working for it right now. */
+export function agentSubagents(): LiveSubagent[] {
+  return state.agent.subagents;
 }
 
 let flushProject: () => Promise<void> = async () => {};

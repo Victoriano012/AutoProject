@@ -1,8 +1,9 @@
 "use client";
 
 import { useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { agentBusy, sendToAgent, stopAgent, subscribeRuns } from "@/lib/runner";
+import { agentBusy, agentSubagents, sendToAgent, stopAgent, subscribeRuns } from "@/lib/runner";
 import { useStore } from "@/lib/store";
+import type { LiveSubagent } from "@/lib/types";
 import ChatInput from "./ChatInput";
 import { StopSquare } from "./icons";
 import RequestStack from "./RequestStack";
@@ -24,6 +25,31 @@ function writeDraft(key: string, value: string) {
   } catch {
     // Private mode or a blocked store: the draft just isn't durable.
   }
+}
+
+const NONE: LiveSubagent[] = [];
+
+/** The subagents the chat's agent has working for it, one violet row each,
+ * gone as each reports back. Nothing renders while there are none. */
+function Subagents() {
+  const subagents = useSyncExternalStore(subscribeRuns, agentSubagents, () => NONE);
+  if (subagents.length === 0) return null;
+  return (
+    <div className="space-y-1.5 pb-2">
+      {subagents.map((s) => (
+        <div
+          key={s.id}
+          className="flex items-center gap-2 rounded-lg border border-violet-200 bg-violet-50 px-3 py-1.5 text-xs text-violet-800"
+        >
+          <span className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-violet-300 border-t-violet-700" />
+          <span className="min-w-0 flex-1 truncate" title={s.description}>
+            {s.description || "Subagent"}
+          </span>
+          {s.type && <span className="shrink-0 text-violet-500/70">{s.type}</span>}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /** The one input bar under the view, talking to the project agent in whichever
@@ -93,6 +119,7 @@ export default function BottomBar() {
     <div className="shrink-0" style={{ margin: "0 5px 5px" }}>
       {/* The chat sheet has its own transcript; the stack is the board's. */}
       {mode === "panel" && <RequestStack onDropped={takeBack} />}
+      {mode === "act" && <Subagents />}
       <div className="flex items-center gap-2">
         <ChatInput
           value={draft}

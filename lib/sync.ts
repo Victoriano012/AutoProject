@@ -8,7 +8,16 @@ import {
 } from "./runner";
 import { useStore } from "./store";
 import { mergeRunState, runEdits } from "./run-state";
-import { AgentRequest, ChatEntry, LogEntry, Mode, Project, Ticket, Worker } from "./types";
+import {
+  AgentRequest,
+  ChatEntry,
+  LiveSubagent,
+  LogEntry,
+  Mode,
+  Project,
+  Ticket,
+  Worker,
+} from "./types";
 
 async function createOrImport(body: { name?: string; path?: string }) {
   const res = await fetch("/api/projects", {
@@ -83,7 +92,13 @@ type StreamEvent =
   | { type: "log"; id: string; entries: LogEntry[] }
   | { type: "tickets"; added: Ticket[]; removed: string[] }
   | { type: "chat"; entries: ChatEntry[] }
-  | { type: "agent"; busy: boolean; mode: Mode | null; requests: AgentRequest[] }
+  | {
+      type: "agent";
+      busy: boolean;
+      mode: Mode | null;
+      requests: AgentRequest[];
+      subagents: LiveSubagent[];
+    }
   | { type: "notes"; notes: string[] }
   | { type: "workers"; workers: Worker[] }
   | { type: "ping" };
@@ -92,7 +107,7 @@ const NO_RUNS: RunStateSnapshot = {
   loops: [],
   active: [],
   tickets: [],
-  agent: { busy: false, mode: null, requests: [] },
+  agent: { busy: false, mode: null, requests: [], subagents: [] },
 };
 
 let source: EventSource | null = null;
@@ -206,7 +221,12 @@ function openStream(dir: string): void {
     } else if (msg.type === "agent") {
       setRuns({
         ...lastRuns,
-        agent: { busy: msg.busy, mode: msg.mode, requests: msg.requests },
+        agent: {
+          busy: msg.busy,
+          mode: msg.mode,
+          requests: msg.requests,
+          subagents: msg.subagents,
+        },
       });
     } else if (msg.type === "ticket") {
       applyRemote(() => store.updateTicket(msg.id, (t) => ({ ...t, ...msg.patch })));

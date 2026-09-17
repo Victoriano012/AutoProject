@@ -2,6 +2,7 @@ import { readProject, writeProject } from "../projects-fs";
 import type {
   AgentRequest,
   ChatEntry,
+  LiveSubagent,
   LogEntry,
   Mode,
   Project,
@@ -26,7 +27,13 @@ export type ProjectEvent =
   | { type: "tickets"; added: Ticket[]; removed: string[] }
   | { type: "chat"; entries: ChatEntry[] }
   /** The project agent's turn began or ended, or its request stack changed. */
-  | { type: "agent"; busy: boolean; mode: Mode | null; requests: AgentRequest[] }
+  | {
+      type: "agent";
+      busy: boolean;
+      mode: Mode | null;
+      requests: AgentRequest[];
+      subagents: LiveSubagent[];
+    }
   | { type: "notes"; notes: string[] }
   /** The whole list: a worker was added, or one's session moved on. */
   | { type: "workers"; workers: Worker[] }

@@ -33,6 +33,10 @@ export type AgentEvent =
   /** `sub`: produced inside a subagent (act mode), so a transcript can indent it. */
   | { type: "text"; text: string; sub?: boolean }
   | { type: "tool"; text: string; sub?: boolean }
+  /** Claude only: the main agent started a subagent (an Agent tool call), and
+   * that call came back. */
+  | { type: "subagent"; id: string; description: string; agentType?: string }
+  | { type: "subagent-end"; id: string }
   | {
       type: "result";
       ok: boolean;
@@ -306,6 +310,26 @@ async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<AgentEvent>
               text: describeTool(block.name, block.input),
               ...(sub && { sub }),
             };
+            // Only the main agent's own subagents; a subagent's nested ones
+            // would be finished before their parent's result anyway.
+            if (!sub && (block.name === "Agent" || block.name === "Task")) {
+              const i = block.input as { description?: string; subagent_type?: string };
+              yield {
+                type: "subagent",
+                id: block.id,
+                description: i.description ?? "",
+                agentType: i.subagent_type,
+              };
+            }
+          }
+        }
+      } else if (msg.type === "user" && msg.parent_tool_use_id === null) {
+        // A tool result addressed to the main agent ends whichever subagent
+        // the same tool_use started (other tools' results match nothing).
+        const content = msg.message.content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block.type === "tool_result") yield { type: "subagent-end", id: block.tool_use_id };
           }
         }
       } else if (msg.type === "result") {

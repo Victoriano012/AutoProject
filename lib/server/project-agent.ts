@@ -164,6 +164,7 @@ async function pump(dir: string): Promise<void> {
   } finally {
     registry.agents.delete(dir);
     registry.agentMode.delete(dir);
+    registry.subagents.delete(dir);
     // A stopped turn is over and done with; a failed one stays in the stack
     // with its error until the person retries or dismisses it.
     if (error !== null && !ctrl.signal.aborted) {
@@ -260,6 +261,19 @@ async function turn(
         } else if (ev.type === "text" || ev.type === "tool") {
           produced = true;
           say(dir, mode, { kind: ev.type, text: ev.sub ? `  ↳ ${ev.text}` : ev.text });
+        } else if (ev.type === "subagent") {
+          const live = registry.subagents.get(dir) ?? [];
+          registry.subagents.set(dir, [
+            ...live,
+            { id: ev.id, description: ev.description, type: ev.agentType },
+          ]);
+          notifyAgent(dir);
+        } else if (ev.type === "subagent-end") {
+          const live = registry.subagents.get(dir) ?? [];
+          if (live.some((s) => s.id === ev.id)) {
+            registry.subagents.set(dir, live.filter((s) => s.id !== ev.id));
+            notifyAgent(dir);
+          }
         } else if (ev.type === "result") {
           if (!ev.ok) failed = ev.text;
           else if (fallback && ev.structuredOutput) {

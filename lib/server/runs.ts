@@ -3,6 +3,7 @@ import {
   type Attachment,
   fileBlockedBy,
   isTicketDone,
+  type LiveSubagent,
   type Mode,
   notReadyReason,
   type Project,
@@ -46,6 +47,8 @@ interface Registry {
   agents: Map<string, AbortController>;
   /** Which mode that turn was sent in, so a client connecting mid-turn knows. */
   agentMode: Map<string, Mode>;
+  /** The subagents that turn has running, oldest first. */
+  subagents: Map<string, LiveSubagent[]>;
   /** Messages for the project agent, by dir, in the order they were sent: the
    * one running first, then the ones waiting, with failed ones left in place. */
   requests: Map<string, AgentRequest[]>;
@@ -65,6 +68,7 @@ export const registry: Registry = (globals.__autoprojectRegistry ??= {
   wakes: new Map(),
   agents: new Map(),
   agentMode: new Map(),
+  subagents: new Map(),
   requests: new Map(),
   inputs: new Map(),
 });
@@ -74,6 +78,7 @@ registry.notes ??= new Map();
 registry.wakes ??= new Map();
 registry.agents ??= new Map();
 registry.agentMode ??= new Map();
+registry.subagents ??= new Map();
 registry.requests ??= new Map();
 registry.inputs ??= new Map();
 
@@ -86,9 +91,14 @@ export interface RunState {
   active: string[];
   /** Ids of tickets with a live agent session. */
   tickets: string[];
-  /** The project agent: mid-turn or idle, in which mode it was asked, and the
-   * requests it has running, waiting or failed. */
-  agent: { busy: boolean; mode: Mode | null; requests: AgentRequest[] };
+  /** The project agent: mid-turn or idle, in which mode it was asked, the
+   * requests it has running, waiting or failed, and the subagents at work. */
+  agent: {
+    busy: boolean;
+    mode: Mode | null;
+    requests: AgentRequest[];
+    subagents: LiveSubagent[];
+  };
 }
 
 export function runState(dir: string): RunState {
@@ -103,6 +113,7 @@ export function runState(dir: string): RunState {
       busy: registry.agents.has(dir),
       mode: registry.agentMode.get(dir) ?? null,
       requests: registry.requests.get(dir) ?? [],
+      subagents: registry.subagents.get(dir) ?? [],
     },
   };
 }
