@@ -25,7 +25,7 @@ export default function ChatInput({
   /** Arrow up from the very start / down from the very end: the caller walks
    * its history (a shell's recall). Anywhere else the arrows move as usual, so
    * on the first or last line they first reach the text's edge, and only the
-   * next press goes on to the neighbouring prompt. */
+   * next press goes on to the neighbouring prompt, caret on its near edge. */
   onHistory?: (dir: "back" | "forward") => void;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -60,9 +60,14 @@ export default function ChatInput({
             if (!edge) return;
             e.preventDefault();
             onHistory(e.key === "ArrowUp" ? "back" : "forward");
-            // The recalled prompt is edited from its end, as in a shell; the
-            // value lands on the next render, hence the frame's wait.
-            requestAnimationFrame(() => el.setSelectionRange(el.value.length, el.value.length));
+            // The caret lands on the recalled prompt's near edge: its start when
+            // walking back, its end when walking forward, so pressing on keeps
+            // walking. The value lands on the next render, hence the frame's wait.
+            const atStart = e.key === "ArrowUp";
+            requestAnimationFrame(() => {
+              const pos = atStart ? 0 : el.value.length;
+              el.setSelectionRange(pos, pos);
+            });
           }
         }}
       />
