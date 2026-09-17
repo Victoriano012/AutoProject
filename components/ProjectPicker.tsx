@@ -63,6 +63,10 @@ type ProjectNodeType = Node<
   "project"
 >;
 
+// Dashes stacked per blue fade on a working node's border. A handful reads as
+// bands; this many reads as one soft fade at a 2px stroke.
+const FADE_STEPS = 16;
+
 function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
   // The server's word on what is working, or the ▶ pressed here a moment ago
   // that the server has not been asked about yet.
@@ -102,16 +106,16 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
           {review ? (
             <rect className="project-turn-track project-turn-dash" stroke="#60a5fa" pathLength={100} />
           ) : (
-            [1, 2, 3, 4, 5].map((k) => {
+            Array.from({ length: FADE_STEPS }, (_, i) => i + 1).map((k) => {
               const period = 100 / 6;
-              const dash = (period * (6 - k)) / 6;
+              const dash = (period * (FADE_STEPS + 1 - k)) / (FADE_STEPS + 1);
               return (
                 <rect
                   key={k}
                   className="project-turn-track project-turn-dash"
                   pathLength={100}
                   style={{
-                    stroke: `color-mix(in srgb, #60a5fa ${k * 20}%, #bfdbfe)`,
+                    stroke: `color-mix(in srgb, #60a5fa ${(k * 100) / FADE_STEPS}%, #bfdbfe)`,
                     strokeDasharray: `${dash / 2} ${period - dash} ${dash / 2} 0`,
                   }}
                 />
