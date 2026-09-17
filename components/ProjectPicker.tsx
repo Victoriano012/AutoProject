@@ -1,5 +1,6 @@
 "use client";
 
+import type { ProjectStatus } from "@/lib/projects-fs";
 import { runProject as runProjectDir, stopProject as stopProjectDir } from "@/lib/runner";
 import {
   createProject,
@@ -58,33 +59,44 @@ function stopProject(id: string): void {
 }
 
 type ProjectNodeType = Node<
-  { name: string; running: boolean; done: boolean; onDelete: () => void },
+  { name: string; status: ProjectStatus; running: boolean; onDelete: () => void },
   "project"
 >;
 
+// Working and review at once: stripes of both colours, since neither state
+// should hide the other. Painted as two backgrounds — a white one clipped to
+// the padding box over the stripes — because a border can only be one colour.
+const STRIPED_BORDER =
+  "border-transparent [background:linear-gradient(#fff,#fff)_padding-box,repeating-linear-gradient(45deg,#60a5fa_0_6px,#facc15_6px_12px)_border-box]";
+
 function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
-  // Running before done, as a ticket node orders them: the live state is what
-  // the person needs to see, and a finished project that is running again has
-  // work going on inside it. Published on the node for the same reason as on a
-  // ticket: the flight box wants this colour, not the hover one it would read
-  // off the node you necessarily hovered to click.
-  const statusBorder = data.running
-    ? "border-blue-400"
-    : data.done
-      ? "border-emerald-500"
-      : "border-zinc-300";
+  // The server's word on what is working, or the ▶ pressed here a moment ago
+  // that the server has not been asked about yet.
+  const working = data.status.working || data.running;
+  const { review, blocked } = data.status;
+  // Live work first, then work waiting on the person, then the odd board where
+  // cards are stuck with nothing moving them. Published on the node for the
+  // same reason as on a ticket: the flight box wants this colour, not the hover
+  // one it would read off the node you necessarily hovered to click — and a
+  // single colour, so the stripes go as their blue.
+  const statusBorder =
+    working && review
+      ? STRIPED_BORDER
+      : working
+        ? "border-blue-400"
+        : review
+          ? "border-yellow-400"
+          : blocked
+            ? "border-red-300"
+            : "border-zinc-300";
+  const base = statusBorder === "border-zinc-300";
   return (
     <div
-      data-zoom-border={statusBorder}
-      className={`group relative w-64 rounded-xl border-2 bg-white p-3 pt-1.5 shadow-lg shadow-zinc-900/10 ${statusBorder}${
-        data.running || data.done ? "" : " hover:border-violet-400"
-      }`}
+      data-zoom-border={statusBorder === STRIPED_BORDER ? "border-blue-400" : statusBorder}
+      className={`group relative w-64 rounded-xl border-2 p-3 pt-1.5 shadow-lg shadow-zinc-900/10 ${statusBorder}${
+        statusBorder === STRIPED_BORDER ? "" : " bg-white"
+      }${base ? " hover:border-violet-400" : ""}`}
     >
-      {data.done && (
-        <span className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500 text-sm font-bold text-white">
-          ✓
-        </span>
-      )}
       {/* One row: name, then trash, then run/stop rightmost — a project is
           just the outermost ticket, so it gets a ticket node's control row. */}
       <div className="flex items-center gap-1.5">
@@ -104,7 +116,7 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
         >
           <TrashIcon />
         </button>
-        {data.running ? (
+        {working ? (
           <span className="flex items-center gap-1.5">
             <span className="h-3.5 w-3.5 animate-spin rounded-full border border-blue-400 border-t-transparent" />
             <StopSquare
@@ -345,33 +357,54 @@ export default function ProjectPicker() {
   const areaRef = useRef<HTMLDivElement>(null);
   const minZoom = useFitAllMinZoom(nodes, areaRef, FIT_PADDING);
 
+  // Nodes are rebuilt from the rows, but a node already on the canvas keeps its
+  // object (position, selection, a drag in progress) and only takes the new
+  // name and status, since this also runs on a timer while the graph is up.
   const refresh = useCallback(async () => {
     const res = await fetch("/api/projects");
     if (!res.ok) return;
     const rows: {
       id: string;
       name: string;
-      done: boolean;
+      status: ProjectStatus;
       metaPosition?: { x: number; y: number };
     }[] = (await res.json()).projects;
-    setNodes(
-      rows.map((r, i) => ({
-        id: r.id,
-        type: "project" as const,
-        position: r.metaPosition ?? { x: (i % 3) * 300, y: Math.floor(i / 3) * 140 },
-        data: {
-          name: r.name,
-          running: isProjectRunning(r.id),
-          done: r.done,
-          onDelete: () => setPendingDelete({ id: r.id, name: r.name }),
-        },
-      }))
+    setNodes((nds) =>
+      rows.map((r, i) => {
+        const prev = nds.find((n) => n.id === r.id);
+        if (!prev)
+          return {
+            id: r.id,
+            type: "project" as const,
+            position: r.metaPosition ?? { x: (i % 3) * 300, y: Math.floor(i / 3) * 140 },
+            data: {
+              name: r.name,
+              status: r.status,
+              running: isProjectRunning(r.id),
+              onDelete: () => setPendingDelete({ id: r.id, name: r.name }),
+            },
+          };
+        const d = prev.data;
+        const same =
+          d.name === r.name &&
+          d.status.working === r.status.working &&
+          d.status.review === r.status.review &&
+          d.status.blocked === r.status.blocked;
+        return same ? prev : { ...prev, data: { ...d, name: r.name, status: r.status } };
+      })
     );
     setLoaded(true);
   }, []);
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  // Status changes while the picker is open — a ticket finishing, the agent
+  // answering — happen on the server, so ask it again every so often.
+  useEffect(() => {
+    const iv = setInterval(() => void refresh(), 2000);
+    return () => clearInterval(iv);
   }, [refresh]);
 
   // Reflect an ongoing run (started from a node, still active after coming

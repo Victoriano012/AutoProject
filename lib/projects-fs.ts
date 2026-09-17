@@ -2,9 +2,9 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import {
+  boardColumn,
   type ChatEntry,
   defaultProject,
-  isTicketDone,
   type Project,
   type Ticket,
   type Worker,
@@ -20,9 +20,16 @@ export interface ProjectRow {
   name: string;
   updated_at: string;
   metaPosition?: { x: number; y: number };
-  /** Finished, so the meta-graph can show a project done the way a graph shows
-   * a ticket done. See `row` for what that means. */
-  done: boolean;
+  /** Which board columns have cards in them, so the meta-graph can colour a
+   * project by what is going on inside it. Done is left out: a finished card
+   * is not something the picker needs to say anything about. */
+  status: ProjectStatus;
+}
+
+export interface ProjectStatus {
+  working: boolean;
+  review: boolean;
+  blocked: boolean;
 }
 
 const projectFile = (dir: string) => path.join(dir, ".autoproject", "project.json");
@@ -111,10 +118,13 @@ function row(dir: string): ProjectRow | null {
     name: p.name,
     updated_at: fs.statSync(projectFile(dir)).mtime.toISOString(),
     metaPosition: p.metaPosition,
-    // Finished when every ticket is done. A project with no tickets is not
-    // finished — `every` on an empty list would say otherwise, and "nothing to
-    // do" is not "done".
-    done: p.tickets.length > 0 && p.tickets.every(isTicketDone),
+    // Asked of the board's own column function so the picker and the board can
+    // never disagree about what is working, waiting or stuck.
+    status: {
+      working: p.tickets.some((t) => boardColumn(t) === "working"),
+      review: p.tickets.some((t) => boardColumn(t) === "review"),
+      blocked: p.tickets.some((t) => boardColumn(t) === "blocked"),
+    },
   };
 }
 
