@@ -72,13 +72,9 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
   // cards are stuck with nothing moving them. Published on the node for the
   // same reason as on a ticket: the flight box wants this colour, not the hover
   // one it would read off the node you necessarily hovered to click — and a
-  // single colour, so the turning looks (below, and in globals.css) go as
-  // their blue. The plain working look paints its own white, since its
-  // gradient has to sit under it.
+  // single colour, so the turning look (below) goes as its blue.
   const statusBorder = working
-    ? review
-      ? "border-transparent"
-      : "project-border-working"
+    ? "border-transparent"
     : review
       ? "border-yellow-400"
       : blocked
@@ -88,19 +84,40 @@ function ProjectNodeInner({ id, data }: NodeProps<ProjectNodeType>) {
   return (
     <div
       data-zoom-border={working ? "border-blue-400" : statusBorder}
-      className={`group relative w-64 rounded-xl border-2 p-3 pt-1.5 shadow-lg shadow-zinc-900/10 ${statusBorder}${
-        statusBorder === "project-border-working" ? "" : " bg-white"
-      }${base ? " hover:border-violet-400" : ""}`}
+      className={`group relative w-64 rounded-xl border-2 bg-white p-3 pt-1.5 shadow-lg shadow-zinc-900/10 ${statusBorder}${
+        base ? " hover:border-violet-400" : ""
+      }`}
     >
-      {/* Working with review pending: blue and yellow dashes chase each other
-          round the frame. Strokes rather than a gradient so a dash keeps its
-          length along the short side, the long side and round the corners.
-          The svg spans the padding box, so the rects reach out a pixel to sit
-          on the (transparent) border ring. */}
-      {working && review && (
+      {/* Working: the border turns like the spinner beside the name. Blue and
+          yellow dashes chase each other when review is pending too; plain
+          working is six blue fades, built as ever narrower, darker dashes
+          stacked on a pale track (the arrays centre each dash on the same
+          spot). Strokes rather than a gradient so a segment keeps its length
+          along the short side, the long side and round the corners. The svg
+          spans the padding box, so the rects reach out a pixel to sit on the
+          (transparent) border ring. */}
+      {working && (
         <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden>
-          <rect className="project-turn-track" stroke="#facc15" />
-          <rect className="project-turn-track project-turn-dash" stroke="#60a5fa" pathLength={100} />
+          <rect className="project-turn-track" stroke={review ? "#facc15" : "#bfdbfe"} />
+          {review ? (
+            <rect className="project-turn-track project-turn-dash" stroke="#60a5fa" pathLength={100} />
+          ) : (
+            [1, 2, 3, 4, 5].map((k) => {
+              const period = 100 / 6;
+              const dash = (period * (6 - k)) / 6;
+              return (
+                <rect
+                  key={k}
+                  className="project-turn-track project-turn-dash"
+                  pathLength={100}
+                  style={{
+                    stroke: `color-mix(in srgb, #60a5fa ${k * 20}%, #bfdbfe)`,
+                    strokeDasharray: `${dash / 2} ${period - dash} ${dash / 2} 0`,
+                  }}
+                />
+              );
+            })
+          )}
         </svg>
       )}
       {/* One row: name, then trash, then run/stop rightmost — a project is
