@@ -246,7 +246,9 @@ function Transcript() {
             // title, rather than a line of the stream saying how many.
             const created = createdTickets(m, board);
             return created.length ? (
-              <div key={i} className="space-y-1">
+              // Tabbed in: these came out of what was sent, they are not
+              // another message in the stream.
+              <div key={i} className="ml-6 space-y-1">
                 {created.map((t) => (
                   <CreatedTicket
                     key={t.id}

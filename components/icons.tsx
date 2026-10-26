@@ -167,18 +167,19 @@ export function RefreshIcon({ size }: { size?: number }) {
   );
 }
 
-/** Feather "message-circle": the chat, offered while the board is showing. */
-/** A ticket stub: the pinched card with its torn-off counterfoil — one card
- * the planner put on the board. */
+/** A card on the board — its title line and a line of description — which is
+ * the kind of ticket this project means. */
 export function TicketIcon({ size = 13 }: { size?: number }) {
   return (
     <Svg size={size}>
-      <path d="M4 7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 0 0 6v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-6z" />
-      <line x1="10" y1="7" x2="10" y2="17" strokeDasharray="2 2" />
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <line x1="7" y1="9" x2="17" y2="9" />
+      <line x1="7" y1="14" x2="13" y2="14" />
     </Svg>
   );
 }
 
+/** Feather "message-circle": the chat, offered while the board is showing. */
 export function ChatIcon({ size }: { size?: number }) {
   return (
     <Svg size={size}>
