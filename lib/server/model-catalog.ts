@@ -4,7 +4,6 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { MODEL_CHOICES, REASONING_LABELS, type ModelChoice, type ModelProvider } from "../models";
 
-export const MODEL_CACHE_TTL_MS = 5 * 60_000;
 const PROVIDERS: ModelProvider[] = ["claude", "codex", "gemini"];
 export interface ProviderCatalog {
   models: ModelChoice[];
@@ -47,7 +46,8 @@ export function knownModels(catalog: ModelCatalog): ModelChoice[] {
 }
 
 /** Disk snapshots also share discovery with Next route workers and restarts.
- * Automatic attempts (including failures) are bounded by the TTL. */
+ * Nothing here discovers on its own: `read` is the only path the app takes
+ * unless someone asks for a refresh. */
 export function createModelCatalog(options: {
   file: () => string;
   discover: (provider: ModelProvider) => Promise<ModelChoice[]>;
@@ -81,11 +81,10 @@ export function createModelCatalog(options: {
     } catch { /* Keep the successful in-memory catalog if disk is unavailable. */ }
     finally { try { fs.rmSync(temporary, { force: true }); } catch { /* read-only disk */ } }
   }
-  function refresh(force = false): Promise<ModelCatalog> {
+  /** Always discovers. Concurrent callers share the one in-flight attempt. */
+  function refresh(): Promise<ModelCatalog> {
     if (inFlight) return inFlight;
     const previous = read();
-    const age = now() - (previous.checkedAt ?? 0);
-    if (!force && previous.checkedAt !== undefined && age >= 0 && age < MODEL_CACHE_TTL_MS) return Promise.resolve(previous);
     inFlight = (async () => {
       const results = await Promise.allSettled(PROVIDERS.map(async (provider) => {
         const models = await options.discover(provider);

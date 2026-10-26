@@ -22,7 +22,7 @@ The launcher builds and starts the production app at `http://127.0.0.1:4123`, re
 
 Choose the agent model in **Settings**. Claude models run through the Claude Agent SDK, Codex models through the Codex CLI, and Gemini models through the local Antigravity CLI (`agy`). The board MCP tool and act-mode subagents are Claude-only; Codex and Gemini panel turns use structured output and act mode works alone. Claude runs are capped at a 200k-token context.
 
-Opening Settings automatically checks the model catalog. Checks are cached for **five minutes**, including failed attempts, and **Refresh models** bypasses that interval. Concurrent refresh requests share the in-flight check. Each provider has a **12-second timeout** and fails independently, so an unavailable tool does not discard the other providers' results.
+Opening Settings never checks the model catalog: it answers from the stored one, so the dropdown is usable immediately. **Refresh models** is the only thing that runs discovery. Concurrent refresh requests share the in-flight check. Each provider has a **12-second timeout** and fails independently, so an unavailable tool does not discard the other providers' results.
 
 Discovery uses the existing tools and their local authentication, without new API credentials or inference turns:
 

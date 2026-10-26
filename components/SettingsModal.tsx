@@ -53,7 +53,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string>();
   const [showStats, setShowStats] = useState(false);
   const [catalog, setCatalog] = useState<readonly ModelChoice[]>(MODEL_CHOICES);
-  const [refreshing, setRefreshing] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [catalogMessage, setCatalogMessage] = useState("");
   const choices = withSelectedModel(catalog, model);
   const reasoningLevels = reasoningEffortsForModel(model, choices);
@@ -101,8 +101,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
         setCatalog(result.models);
         setCatalogMessage(catalogStatus(result));
       })
-      .catch(() => { if (!controller.signal.aborted) setCatalogMessage("Could not refresh models. Using bundled defaults."); })
-      .finally(() => { if (!controller.signal.aborted) setRefreshing(false); });
+      .catch(() => { if (!controller.signal.aborted) setCatalogMessage("Could not load models. Using bundled defaults."); });
     return () => controller.abort();
   }, []);
 
@@ -157,7 +156,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 id="model"
                 className="min-w-0 flex-1 rounded-lg bg-zinc-50 border border-zinc-300 px-2 py-1.5 text-sm outline-none focus:border-zinc-500 disabled:opacity-50"
                 value={model}
-                disabled={!loaded || busy || refreshing}
+                disabled={!loaded || busy}
                 onChange={(e) => {
                   const nextModel = e.target.value;
                   setModel(nextModel);

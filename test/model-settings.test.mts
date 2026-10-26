@@ -23,22 +23,27 @@ test("Settings, config validation, sessions and execution share discovered metad
   ];
   const cache = createModelCatalog({ file: () => path.join(home, "catalog.json"), discover: async (p) => rows.filter((m) => m.provider === p) });
   const snapshot = await cache.refresh();
-  t.mock.method(modelCatalog, "read", () => snapshot);
-  const refreshes: boolean[] = [];
-  t.mock.method(modelCatalog, "refresh", async (force = false) => { refreshes.push(force); return snapshot; });
+  let reads = 0;
+  let refreshes = 0;
+  t.mock.method(modelCatalog, "read", () => { reads++; return snapshot; });
+  t.mock.method(modelCatalog, "refresh", async () => { refreshes++; return snapshot; });
   const { GET, PUT } = await import("../app/api/config/route.ts");
   const modelsRoute = await import("../app/api/models/route.ts");
   const { readConfig, writeConfig, selectedAgentSettings } = await import("../lib/config.ts");
   const put = (body: unknown) => PUT(new Request("http://localhost/api/config", { method: "PUT", body: JSON.stringify(body) }));
   writeConfig({ model: "gpt-6.1-sol", reasoningEffort: "ultra" });
-  for (const fetchModels of [modelsRoute.GET, modelsRoute.POST]) {
+  // Opening Settings reads the stored catalog; only pressing refresh discovers.
+  for (const [fetchModels, discovers] of [[modelsRoute.GET, false], [modelsRoute.POST, true]] as const) {
+    reads = 0;
+    refreshes = 0;
     const response = await fetchModels();
     const catalog = await response.json();
     assert.equal(response.headers.get("Cache-Control"), "no-store");
     assert.deepEqual(catalog.models, catalogModels(snapshot));
     assert.deepEqual(readConfig(), { model: "gpt-6.1-sol", reasoningEffort: "ultra" });
+    assert.equal(refreshes, discovers ? 1 : 0, "only pressing refresh discovers");
+    if (!discovers) assert.ok(reads > 0, "opening Settings answers from the stored catalog");
   }
-  assert.deepEqual(refreshes, [false, true]);
   for (const model of rows) {
     for (const effort of reasoningEffortsForModel(model.value, rows)) {
       assert.equal((await put({ model: model.value, reasoningEffort: effort })).status, 200);

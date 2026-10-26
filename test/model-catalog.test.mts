@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createModelCatalog, catalogModels, knownModels, MODEL_CACHE_TTL_MS } from "../lib/server/model-catalog.ts";
+import { createModelCatalog, catalogModels, knownModels } from "../lib/server/model-catalog.ts";
 import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, latestPerFamily } from "../lib/server/model-discovery.ts";
 import { MODEL_CHOICES, normalizeModelLabel, providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
 
@@ -80,7 +80,7 @@ test("Gemini offers only listed variants and ignores other providers and progres
   assert.equal(resolveReasoningEffort("gemini-new-high", "medium", models), "high");
 });
 
-test("bounded cache coalesces requests, expires, refreshes manually, and persists partial successes", async (t) => {
+test("reads never discover, refreshes always do and coalesce, and partial successes persist", async (t) => {
   const dir = fixture(t);
   const file = () => path.join(dir, "catalog.json");
   let now = 1000;
@@ -92,28 +92,29 @@ test("bounded cache coalesces requests, expires, refreshes manually, and persist
     return [sol];
   };
   const cache = createModelCatalog({ file, now: () => now, discover });
-  const [first, duplicate] = await Promise.all([cache.refresh(), cache.refresh(true)]);
+  // Opening Settings reads; a read must never spawn a CLI, at any cache age.
+  assert.equal(cache.read().providers.codex.source, "bundled");
+  assert.equal(calls, 0);
+  const [first, duplicate] = await Promise.all([cache.refresh(), cache.refresh()]);
   assert.deepEqual(first, duplicate);
-  assert.equal(calls, 3);
+  assert.equal(calls, 3, "concurrent refreshes share one attempt");
   assert.equal(first.providers.codex.source, "discovered");
   assert.equal(first.providers.claude.source, "bundled");
   assert.equal(JSON.stringify(first).includes("private diagnostic"), false);
-  now += MODEL_CACHE_TTL_MS - 1;
-  await cache.refresh();
+  // However fresh the catalog, a read is free and a refresh still discovers.
+  cache.read();
   assert.equal(calls, 3);
+  await cache.refresh();
+  assert.equal(calls, 6, "a refresh is never skipped as too recent");
   now++;
   fail = true;
   const stale = await cache.refresh();
-  assert.equal(calls, 6);
+  assert.equal(calls, 9);
   assert.equal(stale.providers.codex.source, "cached");
   assert.deepEqual(stale.providers.codex.models, [sol]);
-  await cache.refresh();
-  assert.equal(calls, 6, "failures are also cached");
-  await cache.refresh(true);
-  assert.equal(calls, 9);
   const restarted = createModelCatalog({ file, now: () => now, discover });
-  assert.deepEqual((await restarted.refresh()).providers.codex.models, [sol]);
-  assert.equal(calls, 9, "fresh disk snapshots survive restart");
+  assert.deepEqual(restarted.read().providers.codex.models, [sol]);
+  assert.equal(calls, 9, "disk snapshots survive restart without discovering");
   assert.equal(fs.statSync(file()).mode & 0o777, 0o600);
 });
 
@@ -127,7 +128,7 @@ test("removed saved selections remain visible and retain routing without changin
   } });
   await cache.refresh();
   choices = [{ ...alias, value: "next-sonnet" }];
-  const latest = await cache.refresh(true);
+  const latest = await cache.refresh();
   const visible = withSelectedModel(catalogModels(latest), "sonnet", knownModels(latest));
   assert.equal(visible.find((m) => m.value === "sonnet")?.provider, "claude");
   assert.equal(providerForModel("sonnet", knownModels(latest)), "claude");
@@ -198,7 +199,7 @@ test("an unwritable cache preserves successful discovery in memory", async (t) =
   } });
   await cache.refresh();
   fail = true;
-  await cache.refresh(true);
+  await cache.refresh();
   assert.equal(cache.read().providers.codex.source, "cached");
   assert.deepEqual(cache.read().providers.codex.models, [sol]);
   assert.equal(fs.readFileSync(parent, "utf8"), "occupied");
