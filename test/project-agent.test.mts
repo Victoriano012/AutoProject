@@ -297,3 +297,101 @@ test("a request left queued by a restart is dispatched when the project loads", 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("stopping the running request keeps it in the stack, text and all", async () => {
+  const fs = await import("node:fs");
+  const { writeProject } = await import("../lib/projects-fs.ts");
+  const store = await import("../lib/server/project-store.ts");
+  const { ensureLoaded, registry, runState } = await import("../lib/server/runs.ts");
+  const { sendToAgent, stopAgent } = await import("../lib/server/project-agent.ts");
+  const { defaultProject } = await import("../lib/types.ts");
+  const dir = mkdtempSync(join(tmpdir(), "autoproject-stopped-"));
+  writeProject(dir, defaultProject("Stopped", dir));
+  const releaseSlot = await holdEveryRunSlot();
+  try {
+    const sent = sendToAgent(dir, "panel", "Add a cart")!;
+    await until(() => registry.agents.has(dir), "the request was never dispatched");
+
+    stopAgent(dir);
+    await registry.agentTasks.get(dir);
+    // Halted, not deleted: the person's words are still there to retry or take back.
+    assert.deepEqual(
+      runState(dir).agent.requests.map((r) => [r.id, r.state, r.text, r.error]),
+      [[sent.id, "stopped", "Add a cart", undefined]]
+    );
+
+    // Through project.json and a restart: the stack reads back the same, and
+    // a stopped request is not something a load may start on its own.
+    await store.forget(dir);
+    registry.requests.delete(dir);
+    ensureLoaded(dir);
+    assert.deepEqual(
+      runState(dir).agent.requests.map((r) => [r.id, r.state, r.text]),
+      [[sent.id, "stopped", "Add a cart"]]
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(registry.agents.has(dir), false);
+  } finally {
+    registry.agents.get(dir)?.abort();
+    await registry.agentTasks.get(dir);
+    releaseSlot();
+    registry.requests.delete(dir);
+    await store.forget(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stopping the project keeps the whole stack stopped, and run sends it again", async () => {
+  const fs = await import("node:fs");
+  const { writeProject } = await import("../lib/projects-fs.ts");
+  const store = await import("../lib/server/project-store.ts");
+  const { registry, runProject, runState, stopProject } = await import("../lib/server/runs.ts");
+  const { sendToAgent } = await import("../lib/server/project-agent.ts");
+  const { defaultProject } = await import("../lib/types.ts");
+  const dir = mkdtempSync(join(tmpdir(), "autoproject-stopall-"));
+  writeProject(dir, defaultProject("Stop all", dir));
+  const releaseSlot = await holdEveryRunSlot();
+  const stack = () => runState(dir).agent.requests.map((r) => [r.id, r.state, r.text]);
+  try {
+    const first = sendToAgent(dir, "panel", "Add a cart")!;
+    await until(() => registry.agents.has(dir), "the first request was never dispatched");
+    const second = sendToAgent(dir, "panel", "Add checkout")!;
+
+    stopProject(dir, true);
+    // Nothing is thrown away, and the stack says so at once — the one running
+    // and the one still waiting both stopped, in place.
+    assert.deepEqual(stack(), [
+      [first.id, "stopped", "Add a cart"],
+      [second.id, "stopped", "Add checkout"],
+    ]);
+    await registry.agentTasks.get(dir);
+    await new Promise((r) => setTimeout(r, 20));
+    // Stop means stop: the queue does not move on to the next one by itself.
+    assert.deepEqual(stack(), [
+      [first.id, "stopped", "Add a cart"],
+      [second.id, "stopped", "Add checkout"],
+    ]);
+    assert.equal(registry.agents.has(dir), false);
+    assert.deepEqual(store.getProject(dir)!.agentRequests!.map((r) => r.state), ["stopped", "stopped"]);
+
+    // An automatic resume never lifts the person's stop.
+    await runProject(dir, true);
+    assert.deepEqual(stack().map((r) => r[1]), ["stopped", "stopped"]);
+
+    // Pressing run does, the same way it un-pauses a stopped ticket.
+    await runProject(dir, false);
+    await until(() => registry.agents.has(dir), "run never sent the stopped requests again");
+    assert.deepEqual(stack(), [
+      [first.id, "running", "Add a cart"],
+      [second.id, "queued", "Add checkout"],
+    ]);
+  } finally {
+    registry.agents.get(dir)?.abort();
+    await registry.agentTasks.get(dir);
+    releaseSlot();
+    registry.active.delete(dir);
+    registry.requests.delete(dir);
+    await store.forget(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -8,12 +8,17 @@ export type Mode = "panel" | "act";
 
 /** One message sent to the project agent, waiting its turn or taking it. The
  * server keeps them in memory (see project-agent.ts); the browser draws the
- * stack under the board. A request that finished cleanly is simply gone. */
+ * stack under the board. A request that finished cleanly is simply gone.
+ *
+ * A stop is not a finish: "stopped" is a request the person halted — the one
+ * that was running, or one still waiting when the project was stopped — kept
+ * in the stack with its text, to retry or to take back into the input box.
+ * Both halted states survive project.json and a restart. */
 export interface AgentRequest {
   id: string;
   mode: Mode;
   text: string;
-  state: "queued" | "running" | "error";
+  state: "queued" | "running" | "stopped" | "error";
   /** Why the turn failed; set with `state: "error"` only. */
   error?: string;
 }

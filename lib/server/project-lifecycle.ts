@@ -8,6 +8,11 @@ export function isProjectRemoving(dir: string): boolean { return registry.removi
 export async function prepareProjectRemoval(dir: string): Promise<void> {
   if (registry.removing.has(dir)) throw new Error("Project is already being removed");
   registry.removing.add(dir);
+  // The project is going, and its stack with it: nothing could retry those
+  // requests or put their words back in a box that will not exist. Cleared
+  // before the stop, which on its own keeps every request (see stopProject),
+  // so the same stop publishes and persists the empty stack.
+  registry.requests.set(dir, []);
   stopProject(dir, true);
   await Promise.allSettled([
     ...[...registry.claims.values()].filter((claim) => claim.dir === dir).map((claim) => claim.done),

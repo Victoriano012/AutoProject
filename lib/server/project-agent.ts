@@ -191,9 +191,14 @@ async function pumpOnce(dir: string): Promise<void> {
     registry.agents.delete(dir);
     registry.agentMode.delete(dir);
     registry.subagents.delete(dir);
-    // A stopped turn is over and done with; a failed one stays in the stack
-    // with its error until the person retries or dismisses it.
-    if (error !== null && !ctrl.signal.aborted) {
+    // Only a turn that finished leaves the stack. A failed one stays with its
+    // error, a stopped one stays as it was sent: a stop halts the work, it
+    // never throws the person's words away — they retry it or take it back
+    // into the box from the row's ✕.
+    if (ctrl.signal.aborted) {
+      req.state = "stopped";
+      delete req.error;
+    } else if (error !== null) {
       req.state = "error";
       req.error = error;
     } else {
@@ -214,8 +219,9 @@ export function stopAgent(dir: string): void {
   registry.agents.get(dir)?.abort();
 }
 
-/** The ✕ on a request: a waiting or failed one is dropped; the running one is
- * stopped (and dropped by the turn's own wind-down). */
+/** The ✕ on a request: a waiting, stopped or failed one is dropped (its words
+ * go back to the input box); the running one is only stopped — it stays in the
+ * stack as "stopped", so a second ✕ is what dismisses it. */
 export function cancelRequest(dir: string, id: string): void {
   const req = requests(dir).find((r) => r.id === id);
   if (!req) return;
@@ -224,10 +230,11 @@ export function cancelRequest(dir: string, id: string): void {
   notifyAgent(dir);
 }
 
-/** Send a failed request again, unchanged, at its place in the stack. */
+/** Send a halted request — failed or stopped — again, unchanged, at its place
+ * in the stack. */
 export function retryRequest(dir: string, id: string): void {
   if (registry.removing.has(dir)) return;
-  const req = requests(dir).find((r) => r.id === id && r.state === "error");
+  const req = requests(dir).find((r) => r.id === id && (r.state === "error" || r.state === "stopped"));
   if (!req) return;
   req.state = "queued";
   delete req.error;
@@ -237,11 +244,14 @@ export function retryRequest(dir: string, id: string): void {
 
 /**
  * Pressing run at the top is the person saying "go" about everything they have
- * asked for, the stack included: every request sitting at "error" — a turn
- * that failed, or one a crash left mid-flight — goes back to "queued", keeping
- * its id and its place, and the queue is pumped (which also picks up anything
- * left waiting because the pump stopped). The error text goes with the state:
- * what went wrong stays in the transcript.
+ * asked for, the stack included: every halted request — one that failed, one a
+ * crash left mid-flight, one the person stopped — goes back to "queued",
+ * keeping its id and its place, and the queue is pumped (which also picks up
+ * anything left waiting because the pump stopped). The error text goes with
+ * the state: what went wrong stays in the transcript.
+ *
+ * Stopped ones included, for the same reason run un-pauses a ticket the person
+ * stopped: an explicit run lifts the person's own stop.
  *
  * "Never silently replay an action after a crash" still holds where it was
  * written — the load path (see ensureLoaded), which parks an interrupted
@@ -256,7 +266,7 @@ export function resumeFailedRequests(dir: string): void {
   if (registry.removing.has(dir)) return;
   let revived = false;
   for (const req of requests(dir)) {
-    if (req.state !== "error") continue;
+    if (req.state !== "error" && req.state !== "stopped") continue;
     req.state = "queued";
     delete req.error;
     revived = true;

@@ -583,15 +583,21 @@ export function stopTicket(dir: string, ticketId: string): void {
 export function stopProject(dir: string, byUser = false): void {
   registry.active.delete(dir);
   registry.agents.get(dir)?.abort();
-  registry.requests.set(dir, []);
+  // Stop halts the work; it never deletes what the person asked for. The
+  // running turn is aborted and the ones still waiting are marked stopped
+  // here — so nothing starts again on its own — with every id and every place
+  // in the stack kept. The aborted turn marks itself stopped as it winds down;
+  // marking it now means the stack says so at once, and says so on disk if the
+  // process dies before the wind-down gets there.
+  for (const request of registry.requests.get(dir) ?? []) {
+    if (request.state === "queued" || request.state === "running") request.state = "stopped";
+  }
   const prefix = dir + "\u0000";
   for (const [key, controller] of registry.controllers) if (key.startsWith(prefix)) controller.abort();
   for (const key of registry.pendingFeedback.keys()) if (key.startsWith(prefix)) registry.pendingFeedback.delete(key);
   for (const key of registry.notes.keys()) if (key.startsWith(prefix)) registry.notes.delete(key);
   persistFeedback(dir);
-  const project = store.getProject(dir);
-  if (project) store.setProject(dir, { ...project, agentRequests: [] });
-  notifyAgent(dir);
+  notifyAgent(dir); // persists the stopped stack
   for (const t of store.getProject(dir)?.tickets ?? []) {
     if (byUser && !isTicketDone(t)) registry.userStopped.add(ticketKey(dir, t.id));
     registry.controllers.get(ticketKey(dir, t.id))?.abort();
