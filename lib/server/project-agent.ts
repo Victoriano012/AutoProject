@@ -235,6 +235,36 @@ export function retryRequest(dir: string, id: string): void {
   void pump(dir);
 }
 
+/**
+ * Pressing run at the top is the person saying "go" about everything they have
+ * asked for, the stack included: every request sitting at "error" — a turn
+ * that failed, or one a crash left mid-flight — goes back to "queued", keeping
+ * its id and its place, and the queue is pumped (which also picks up anything
+ * left waiting because the pump stopped). The error text goes with the state:
+ * what went wrong stays in the transcript.
+ *
+ * "Never silently replay an action after a crash" still holds where it was
+ * written — the load path (see ensureLoaded), which parks an interrupted
+ * request at "error" rather than re-running it. An explicit press of run is
+ * not a silent replay: it is the person asking.
+ *
+ * Only from an explicit run, never the board's automatic scheduler, so a
+ * request that fails every time is not retried for as long as the board is
+ * open — exactly how "error" stays terminal for tickets.
+ */
+export function resumeFailedRequests(dir: string): void {
+  if (registry.removing.has(dir)) return;
+  let revived = false;
+  for (const req of requests(dir)) {
+    if (req.state !== "error") continue;
+    req.state = "queued";
+    delete req.error;
+    revived = true;
+  }
+  if (revived) notifyAgent(dir);
+  void pump(dir);
+}
+
 /** One turn. Resolves with the failure the person was shown, or null. */
 async function turn(
   dir: string,

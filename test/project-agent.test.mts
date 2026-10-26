@@ -195,3 +195,105 @@ test("a chat message reaches a running chat turn at once; otherwise it waits lik
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/** Poll until the condition holds; the dispatch it waits for crosses a
+ * dynamic import and the queue's own microtasks. */
+async function until(ok: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 2000 && !ok(); i++) await new Promise((r) => setTimeout(r, 1));
+  assert.ok(ok(), what);
+}
+
+/** Take the process's only run slot, so a dispatched turn parks on the limiter
+ * instead of reaching the agent SDK: the queue's behaviour is observable (the
+ * request goes "running") with nothing actually run. */
+async function holdEveryRunSlot(): Promise<() => void> {
+  const { runLimiter } = await import("../lib/server/run-limiter.ts");
+  const { providerForModel } = await import("../lib/server/model-settings.ts");
+  const { selectedModel } = await import("../lib/config.ts");
+  const previous = process.env.AUTOPROJECT_MAX_RUNS;
+  process.env.AUTOPROJECT_MAX_RUNS = "1";
+  const release = await runLimiter.acquire(providerForModel(selectedModel()), new AbortController().signal);
+  return () => {
+    release();
+    if (previous === undefined) delete process.env.AUTOPROJECT_MAX_RUNS;
+    else process.env.AUTOPROJECT_MAX_RUNS = previous;
+  };
+}
+
+test("pressing run re-runs a failed request; the board's own resume does not", async () => {
+  const fs = await import("node:fs");
+  const { writeProject } = await import("../lib/projects-fs.ts");
+  const store = await import("../lib/server/project-store.ts");
+  const { registry, runProject, runState } = await import("../lib/server/runs.ts");
+  const { defaultProject } = await import("../lib/types.ts");
+  const dir = mkdtempSync(join(tmpdir(), "autoproject-agent-"));
+  writeProject(dir, defaultProject("Revive", dir));
+  const releaseSlot = await holdEveryRunSlot();
+  registry.requests.set(dir, [
+    { id: "r1", mode: "panel", text: "Add a cart", state: "error", error: "boom" },
+    { id: "r2", mode: "panel", text: "Add checkout", state: "queued" },
+  ]);
+  try {
+    // The automatic scheduler resumes: a request that failed stays failed, or
+    // one failing every time would be retried for as long as the board is open.
+    await runProject(dir, true);
+    assert.deepEqual(
+      runState(dir).agent.requests.map((r) => [r.id, r.state]),
+      [["r1", "error"], ["r2", "queued"]]
+    );
+
+    // Pressing run is the person saying "go" about everything they asked for.
+    await runProject(dir, false);
+    await until(() => registry.agents.has(dir), "the revived request was never dispatched");
+    assert.deepEqual(
+      runState(dir).agent.requests.map((r) => [r.id, r.state, r.error]),
+      [["r1", "running", undefined], ["r2", "queued", undefined]]
+    );
+    // Persisted too, so the stack survives the next load in the same order.
+    assert.deepEqual(store.getProject(dir)!.agentRequests!.map((r) => r.id), ["r1", "r2"]);
+  } finally {
+    registry.agents.get(dir)?.abort();
+    await registry.agentTasks.get(dir);
+    releaseSlot();
+    registry.active.delete(dir);
+    registry.requests.delete(dir);
+    await store.forget(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a request left queued by a restart is dispatched when the project loads", async () => {
+  const fs = await import("node:fs");
+  const { writeProject } = await import("../lib/projects-fs.ts");
+  const store = await import("../lib/server/project-store.ts");
+  const { ensureLoaded, registry, runState } = await import("../lib/server/runs.ts");
+  const { defaultProject } = await import("../lib/types.ts");
+  const dir = mkdtempSync(join(tmpdir(), "autoproject-restart-"));
+  // project.json as the dead process left it: one turn mid-flight, one waiting.
+  writeProject(dir, {
+    ...defaultProject("Restart", dir),
+    agentRequests: [
+      { id: "r1", mode: "panel", text: "Add a cart", state: "running" },
+      { id: "r2", mode: "panel", text: "Add checkout", state: "queued" },
+    ],
+  });
+  const releaseSlot = await holdEveryRunSlot();
+  registry.requests.delete(dir);
+  try {
+    ensureLoaded(dir);
+    await until(() => registry.agents.has(dir), "the queued request was never dispatched");
+    assert.deepEqual(
+      runState(dir).agent.requests.map((r) => [r.id, r.state]),
+      // The interrupted turn waits for the person; the one never dispatched runs.
+      [["r1", "error"], ["r2", "running"]]
+    );
+    assert.match(runState(dir).agent.requests[0].error!, /Server restarted/);
+  } finally {
+    registry.agents.get(dir)?.abort();
+    await registry.agentTasks.get(dir);
+    releaseSlot();
+    registry.requests.delete(dir);
+    await store.forget(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

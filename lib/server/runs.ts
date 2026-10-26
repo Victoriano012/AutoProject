@@ -78,7 +78,8 @@ export function ensureLoaded(dir: string): Project | null {
       registry.pendingFeedback.set(ticketKey(dir, id), message);
     }
     // Interrupted requests are retained for an explicit retry; never silently
-    // replay an action after a crash. Requests not yet dispatched stay queued.
+    // replay an action after a crash. (Pressing run is not silent — see
+    // resumeFailedRequests.) Requests not yet dispatched stay queued.
     registry.requests.set(dir, (project.agentRequests ?? []).map((request) =>
       request.state === "running"
         ? { ...request, state: "error" as const, error: "Server restarted during this request. Retry to continue." }
@@ -474,6 +475,15 @@ async function drainProject(dir: string, resume: boolean): Promise<void> {
     // run gives every failure another go, but not one they had deliberately
     // stopped — even though the next lines lift that stop.
     reviveFailures(dir);
+    // The stack is part of "everything the person asked for": a failed request
+    // is re-queued and the agent's queue pumped, the same way a failed ticket
+    // goes back to todo. The helper lives next to the queue it edits
+    // (circular import: project-agent imports this module).
+    void import("./project-agent")
+      .then(({ resumeFailedRequests }) => {
+        if (!registry.removing.has(dir)) resumeFailedRequests(dir);
+      })
+      .catch((error) => console.error("Could not resume the project queue", error));
     const prefix = dir + "\u0000";
     for (const key of [...registry.userStopped])
       if (key.startsWith(prefix)) registry.userStopped.delete(key);
