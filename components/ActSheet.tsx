@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { takeBackDraft } from "@/lib/draft";
+import { modeColors } from "@/lib/mode-colors";
 import { agentBusy, agentRequests, cancelRequest, retryRequest, subscribeRuns } from "@/lib/runner";
 import { useStore } from "@/lib/store";
 import type { AgentRequest, ChatEntry, Ticket } from "@/lib/types";
@@ -102,7 +103,7 @@ function PendingMessage({ request }: { request: AgentRequest }) {
   const halted = request.state === "error" || request.state === "stopped";
   return (
     <div
-      className={`rounded px-2 py-1 ${request.mode === "panel" ? "bg-amber-100" : "bg-sky-100"}`}
+      className={`rounded px-2 py-1 ${modeColors(request.mode).bubble}`}
     >
       <p className="font-mono text-sm text-zinc-700 whitespace-pre-wrap opacity-50">
         <span className="text-zinc-400">&gt; </span>
@@ -222,13 +223,12 @@ function Transcript() {
         switch (m.kind) {
           case "user":
             // The two modes do different things with what was sent, so each
-            // message's background says which: amber for the board (panel),
-            // sky for the chat (act).
+            // message's background says which (see lib/mode-colors.ts).
             return (
               <p
                 key={i}
                 className={`rounded px-2 py-1 font-mono text-sm text-zinc-700 whitespace-pre-wrap ${
-                  m.mode === "panel" ? "bg-amber-100" : "bg-sky-100"
+                  modeColors(m.mode).bubble
                 }`}
               >
                 <span className="text-zinc-400">&gt; </span>
