@@ -27,8 +27,10 @@ Opening Settings automatically checks the model catalog. Checks are cached for *
 Discovery uses the existing tools and their local authentication, without new API credentials or inference turns:
 
 - **Codex:** the installed CLI's [app-server `model/list` RPC](https://learn.chatgpt.com/docs/app-server#list-models-modellist), including pagination and reported reasoning options. New IDs such as `gpt-6.1-sol` appear when returned by that CLI; AutoProject does not maintain a version-specific allowlist.
-- **Claude:** the installed Claude Agent SDK's `supportedModels()`, including aliases, resolved IDs, and supported effort levels.
+- **Claude:** the installed Claude Agent SDK's `supportedModels()`, listing each model once under the name the SDK reports, with its supported effort levels.
 - **Gemini:** `agy models`, grouping only the Gemini variants actually listed. Other providers exposed by `agy` are excluded so their routing stays with the existing integrations.
+
+Only the newest release of each model family is offered: `gpt-6.1-sol` replaces `gpt-6-sol` and `gpt-5.6-sol`, while a family with no newer release stays listed. This compares the version inside each ID rather than a fixed list, so a future release supersedes its predecessors without a code change. A saved model that this hides stays visible and selectable.
 
 The last successful catalog for each provider is stored in `~/.autoproject/model-catalog.json` and survives server restarts. Discovery failures use that provider's saved catalog, or bundled defaults when it has never succeeded. Settings reports which providers are using a fallback. An unreadable cache falls back to memory or bundled defaults; an unwritable cache still permits discovery for the current server process. The tools may themselves return cached or bundled catalogs; a listed model is not a guarantee of account access.
 

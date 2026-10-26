@@ -14,7 +14,8 @@ export function parseCodexModels(data: unknown): ModelChoice[] {
   return data.flatMap((row) => {
     if (!row || typeof row.model !== "string" || !row.model.trim() || row.hidden === true) return [];
     const reasoningEfforts = efforts(row.supportedReasoningEfforts?.map((e: { reasoningEffort?: unknown }) => e?.reasoningEffort));
-    return [{ value: row.model, label: typeof row.displayName === "string" ? row.displayName : row.model,
+    const name = typeof row.displayName === "string" && row.displayName ? row.displayName : row.model;
+    return [{ value: row.model, label: name.replace(/-(?=[A-Za-z])/g, " "),
       provider: "codex" as const, reasoningEfforts,
       defaultReasoningEffort: reasoningEfforts.find((e) => e === row.defaultReasoningEffort) }];
   });
@@ -86,11 +87,8 @@ export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelCh
 export function parseClaudeModels(rows: ModelInfo[]): ModelChoice[] {
   return rows.flatMap((row) => {
     if (!row.value?.trim()) return [];
-    const choice: ModelChoice = { value: row.value, label: row.displayName || row.value, provider: "claude",
-      reasoningEfforts: row.supportsEffort === false ? [] : efforts(row.supportedEffortLevels) };
-    return row.resolvedModel && row.resolvedModel !== row.value
-      ? [choice, { ...choice, value: row.resolvedModel, label: `${choice.label} (${row.resolvedModel})` }]
-      : [choice];
+    return [{ value: row.value, label: row.displayName || row.value, provider: "claude",
+      reasoningEfforts: row.supportsEffort === false ? [] : efforts(row.supportedEffortLevels) }];
   });
 }
 
@@ -150,6 +148,39 @@ export function discoverGemini(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelC
   });
 }
 
+const VERSION = /^\d+(?:\.\d+)*$/;
+
+function newer(a: number[], b: number[]): boolean {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const step = (a[i] ?? 0) - (b[i] ?? 0);
+    if (step) return step > 0;
+  }
+  return false;
+}
+
+/** The tools list every release they still accept, so `gpt-6.1-sol` arrives
+ * beside `gpt-6-sol` and `gpt-5.6-sol`. Keep the newest of each family and drop
+ * the superseded ones; a family with no newer release stays listed, and an ID
+ * carrying no version (Claude's aliases) is its own family. Saved selections
+ * that this hides stay visible and routable through the retained history. */
+export function latestPerFamily(models: ModelChoice[]): ModelChoice[] {
+  const versions = new Map<string, number[]>();
+  const latest = new Map<string, ModelChoice>();
+  for (const model of models) {
+    const parts = model.value.split("-");
+    const at = parts.findIndex((part) => VERSION.test(part));
+    const family = at < 0 ? model.value : parts.filter((_, i) => i !== at).join("-");
+    const version = at < 0 ? [] : parts[at].split(".").map(Number);
+    const best = versions.get(family);
+    if (best && !newer(version, best)) continue;
+    versions.set(family, version);
+    latest.set(family, model);
+  }
+  return [...latest.values()];
+}
+
+const newest = (discover: () => Promise<ModelChoice[]>) => () => discover().then(latestPerFamily);
+
 export const discoverers: Record<ModelProvider, () => Promise<ModelChoice[]>> = {
-  codex: discoverCodex, claude: discoverClaude, gemini: discoverGemini,
+  codex: newest(discoverCodex), claude: newest(discoverClaude), gemini: newest(discoverGemini),
 };

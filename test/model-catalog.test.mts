@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createModelCatalog, catalogModels, knownModels, MODEL_CACHE_TTL_MS } from "../lib/server/model-catalog.ts";
-import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini } from "../lib/server/model-discovery.ts";
+import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, latestPerFamily } from "../lib/server/model-discovery.ts";
 import { providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
 
 function setEnv(t: test.TestContext, key: string, value: string) {
@@ -36,18 +36,39 @@ test("discovery learns Sol-6.1 and capabilities without inferring from names", (
   assert.deepEqual(parseCodexModels([{ model: "hidden", hidden: true }, { id: "wrong" }]), []);
 });
 
-test("Claude aliases and canonical IDs share explicitly reported capabilities", () => {
+test("Claude models are listed once under the name the tool reports", () => {
   const models = parseClaudeModels([
     { value: "sonnet", resolvedModel: "claude-new-sonnet", displayName: "Sonnet", description: "", supportedEffortLevels: ["low", "high"] },
     { value: "unknown", displayName: "Unknown", description: "" },
     { value: "disabled", displayName: "Disabled", description: "", supportsEffort: false, supportedEffortLevels: ["high"] },
   ]);
-  for (const id of ["sonnet", "claude-new-sonnet"]) {
-    assert.equal(providerForModel(id, models), "claude");
-    assert.deepEqual(reasoningEffortsForModel(id, models), ["low", "high"]);
-  }
+  // The resolved ID is the same model under a pinned name: listing it too would
+  // double the menu and leave the raw ID showing in the label.
+  assert.deepEqual(models.map((m) => [m.value, m.label]), [["sonnet", "Sonnet"], ["unknown", "Unknown"], ["disabled", "Disabled"]]);
+  assert.equal(providerForModel("sonnet", models), "claude");
+  assert.deepEqual(reasoningEffortsForModel("sonnet", models), ["low", "high"]);
   assert.deepEqual(reasoningEffortsForModel("unknown", models), []);
   assert.deepEqual(reasoningEffortsForModel("disabled", models), []);
+});
+
+test("only the newest release of each family is offered, and a hidden one stays selectable", () => {
+  const codex = parseCodexModels([
+    { model: "gpt-6.1-sol", displayName: "GPT-6.1-Sol" }, { model: "gpt-6-astra", displayName: "GPT-6-Astra" },
+    { model: "gpt-6-sol", displayName: "GPT-6-Sol" }, { model: "gpt-5.6-sol", displayName: "GPT-5.6-Sol" },
+    { model: "gpt-5.6-terra", displayName: "GPT-5.6-Terra" },
+  ]);
+  // Superseded releases drop out; Terra has no newer release, so it stays.
+  assert.deepEqual(latestPerFamily(codex).map((m) => [m.value, m.label]),
+    [["gpt-6.1-sol", "GPT-6.1 Sol"], ["gpt-6-astra", "GPT-6 Astra"], ["gpt-5.6-terra", "GPT-5.6 Terra"]]);
+  // Unversioned aliases are each their own family, so none of them collapse.
+  const claude = parseClaudeModels([
+    { value: "opus", displayName: "Opus", description: "" }, { value: "sonnet", displayName: "Sonnet", description: "" },
+    { value: "haiku", displayName: "Haiku", description: "" },
+  ]);
+  assert.deepEqual(latestPerFamily(claude).map((m) => m.value), ["opus", "sonnet", "haiku"]);
+  // A superseded model someone already picked must remain visible and routable.
+  const listed = withSelectedModel(latestPerFamily(codex), "gpt-5.6-sol", codex);
+  assert.deepEqual(listed.at(-1), { value: "gpt-5.6-sol", label: "GPT-5.6 Sol (saved selection)", provider: "codex", reasoningEfforts: [], defaultReasoningEffort: undefined });
 });
 
 test("Gemini offers only listed variants and ignores other providers and progress text", () => {
