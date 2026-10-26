@@ -1,7 +1,7 @@
 import { spawn, execFile } from "node:child_process";
 import os from "node:os";
 import { query, type ModelInfo, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { REASONING_LABELS, type ModelChoice, type ModelProvider, type ReasoningEffort } from "../models";
+import { normalizeChoice, normalizeModelLabel, REASONING_LABELS, type ModelChoice, type ModelProvider, type ReasoningEffort } from "../models";
 
 export const DISCOVERY_TIMEOUT_MS = 12_000;
 const MAX_OUTPUT = 2 * 1024 * 1024;
@@ -15,9 +15,9 @@ export function parseCodexModels(data: unknown): ModelChoice[] {
     if (!row || typeof row.model !== "string" || !row.model.trim() || row.hidden === true) return [];
     const reasoningEfforts = efforts(row.supportedReasoningEfforts?.map((e: { reasoningEffort?: unknown }) => e?.reasoningEffort));
     const name = typeof row.displayName === "string" && row.displayName ? row.displayName : row.model;
-    return [{ value: row.model, label: name.replace(/-(?=[A-Za-z])/g, " "),
+    return [normalizeChoice({ value: row.model, label: name,
       provider: "codex" as const, reasoningEfforts,
-      defaultReasoningEffort: reasoningEfforts.find((e) => e === row.defaultReasoningEffort) }];
+      defaultReasoningEffort: reasoningEfforts.find((e) => e === row.defaultReasoningEffort) })];
   });
 }
 
@@ -84,11 +84,21 @@ export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelCh
   });
 }
 
+/** The SDK's displayName is bare ("Opus"); the version sits at the head of the
+ * description ("Opus 5.5 · Best for everyday tasks"). Prefer that when it
+ * actually names one, so Claude reads like the other two providers. */
+function claudeLabel(row: ModelInfo): string {
+  const head = row.description?.split("\u00b7")[0]?.trim() ?? "";
+  const named = normalizeModelLabel(head);
+  return /\d/.test(named) ? named : row.displayName || row.value;
+}
+
 export function parseClaudeModels(rows: ModelInfo[]): ModelChoice[] {
   return rows.flatMap((row) => {
-    if (!row.value?.trim()) return [];
-    return [{ value: row.value, label: row.displayName || row.value, provider: "claude",
-      reasoningEfforts: row.supportsEffort === false ? [] : efforts(row.supportedEffortLevels) }];
+    // "default" is an alias for another listed model, not a model of its own.
+    if (!row.value?.trim() || row.value === "default") return [];
+    return [normalizeChoice({ value: row.value, label: claudeLabel(row), provider: "claude" as const,
+      reasoningEfforts: row.supportsEffort === false ? [] : efforts(row.supportedEffortLevels) })];
   });
 }
 
@@ -133,10 +143,10 @@ export function parseGeminiModels(output: string): ModelChoice[] {
     const reasoningModels = { ...previous?.reasoningModels, [effort]: value };
     const reasoningEfforts = (["low", "medium", "high"] as const).filter((e) => reasoningModels[e]);
     groups.set(base, { value: reasoningModels.high ?? previous?.value ?? value,
-      label: label.replace(/\s*\((Low|Medium|High)\)$/, ""), provider: "gemini",
+      label, provider: "gemini",
       reasoningEfforts, reasoningModels, defaultReasoningEffort: reasoningEfforts.at(-1) });
   }
-  return [...groups.values()];
+  return [...groups.values()].map(normalizeChoice);
 }
 
 export function discoverGemini(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelChoice[]> {

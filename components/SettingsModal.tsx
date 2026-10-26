@@ -30,7 +30,7 @@ async function fetchCatalog(force: boolean, signal?: AbortSignal): Promise<Catal
 }
 
 const PROVIDERS: { value: ModelProvider; label: string }[] = [
-  { value: "claude", label: "Claude Code" },
+  { value: "claude", label: "Claude" },
   { value: "codex", label: "Codex" },
   { value: "gemini", label: "Gemini" },
 ];

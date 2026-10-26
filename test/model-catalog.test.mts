@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { createModelCatalog, catalogModels, knownModels, MODEL_CACHE_TTL_MS } from "../lib/server/model-catalog.ts";
 import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, latestPerFamily } from "../lib/server/model-discovery.ts";
-import { providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
+import { MODEL_CHOICES, normalizeModelLabel, providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
 
 function setEnv(t: test.TestContext, key: string, value: string) {
   const previous = process.env[key];
@@ -59,7 +59,7 @@ test("only the newest release of each family is offered, and a hidden one stays 
   ]);
   // Superseded releases drop out; Terra has no newer release, so it stays.
   assert.deepEqual(latestPerFamily(codex).map((m) => [m.value, m.label]),
-    [["gpt-6.1-sol", "GPT-6.1 Sol"], ["gpt-6-astra", "GPT-6 Astra"], ["gpt-5.6-terra", "GPT-5.6 Terra"]]);
+    [["gpt-6.1-sol", "Sol 6.1"], ["gpt-6-astra", "Astra 6"], ["gpt-5.6-terra", "Terra 5.6"]]);
   // Unversioned aliases are each their own family, so none of them collapse.
   const claude = parseClaudeModels([
     { value: "opus", displayName: "Opus", description: "" }, { value: "sonnet", displayName: "Sonnet", description: "" },
@@ -68,7 +68,7 @@ test("only the newest release of each family is offered, and a hidden one stays 
   assert.deepEqual(latestPerFamily(claude).map((m) => m.value), ["opus", "sonnet", "haiku"]);
   // A superseded model someone already picked must remain visible and routable.
   const listed = withSelectedModel(latestPerFamily(codex), "gpt-5.6-sol", codex);
-  assert.deepEqual(listed.at(-1), { value: "gpt-5.6-sol", label: "GPT-5.6 Sol (saved selection)", provider: "codex", reasoningEfforts: [], defaultReasoningEffort: undefined });
+  assert.deepEqual(listed.at(-1), { value: "gpt-5.6-sol", label: "Sol 5.6 (saved selection)", provider: "codex", reasoningEfforts: [], defaultReasoningEffort: undefined });
 });
 
 test("Gemini offers only listed variants and ignores other providers and progress text", () => {
@@ -202,4 +202,38 @@ test("an unwritable cache preserves successful discovery in memory", async (t) =
   assert.equal(cache.read().providers.codex.source, "cached");
   assert.deepEqual(cache.read().providers.codex.models, [sol]);
   assert.equal(fs.readFileSync(parent, "utf8"), "occupied");
+});
+
+test("every provider's spelling collapses to family then version", () => {
+  // The exact strings each CLI hands us today.
+  assert.equal(normalizeModelLabel("GPT-6.1-Sol"), "Sol 6.1");
+  assert.equal(normalizeModelLabel("GPT-6-Astra"), "Astra 6");
+  assert.equal(normalizeModelLabel("Gemini 3.8 Flash (High)"), "Flash 3.8");
+  assert.equal(normalizeModelLabel("Gemini 3.1 Pro"), "Pro 3.1");
+  assert.equal(normalizeModelLabel("Default (recommended)"), "Default");
+  assert.equal(normalizeModelLabel("Fable 5.1 (default)"), "Fable 5.1");
+  assert.equal(normalizeModelLabel("Claude Opus 5.5"), "Opus 5.5");
+  assert.equal(normalizeModelLabel("Haiku 4.5"), "Haiku 4.5");
+  // Shapes we cannot read are passed through rather than mangled.
+  for (const odd of ["Opus", "claude-haiku-4-5-20251001", "GPT-5.6", "o3"]) {
+    assert.equal(normalizeModelLabel(odd), odd);
+  }
+  // Bundled entries are normalised by the same pass as discovered ones.
+  assert.equal(MODEL_CHOICES.find((m) => m.value === "gpt-6-astra")?.label, "Astra 6");
+  assert.ok(!MODEL_CHOICES.some((m) => /default|recommended/i.test(m.label)));
+});
+
+test("Claude's Default alias is not a model, and picking it still resolves", () => {
+  const models = parseClaudeModels([
+    { value: "default", resolvedModel: "claude-opus-5", displayName: "Default (recommended)", description: "", supportedEffortLevels: ["low", "high"] },
+    // The SDK carries the version in the description, not the display name.
+    { value: "opus", resolvedModel: "claude-opus-5", displayName: "Opus", description: "Opus 5.5 \u00b7 Best for everyday, complex tasks", supportedEffortLevels: ["low", "high"] },
+  ]);
+  assert.deepEqual(models.map((m) => [m.value, m.label]), [["opus", "Opus 5.5"]]);
+  // Someone already saved it: it must stay visible, selectable and Claude-routed.
+  const listed = withSelectedModel(models, "default");
+  assert.equal(listed.length, 2);
+  assert.equal(listed.at(-1)?.value, "default");
+  assert.equal(listed.at(-1)?.provider, "claude");
+  assert.equal(providerForModel("default", models), "claude");
 });

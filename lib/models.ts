@@ -26,12 +26,35 @@ export interface ModelChoice {
   reasoningModels?: Partial<Record<ReasoningEffort, string>>;
 }
 
+const LABEL_NOISE = /\s*\((?:default|recommended|none|minimal|low|medium|high|extra high|xhigh|max|ultra)\)$/i;
+const VENDORS = new Set(["claude", "anthropic", "gpt", "openai", "gemini", "google"]);
+const VERSION_WORD = /^\d+(?:\.\d+)*$/;
+
+/** Every CLI spells its models differently — "GPT-6.1-Sol", "Gemini 3.8 Flash
+ * (High)", "Fable 5.1 (default)" — so the dropdown reads as three vocabularies
+ * at once. Reduce them all to family then version, dropping the vendor word
+ * that the provider group above the dropdown already says. A name that does not
+ * fit that shape is passed through untouched: an odd name beats a wrong one. */
+export function normalizeModelLabel(label: string): string {
+  let name = label.trim();
+  while (LABEL_NOISE.test(name)) name = name.replace(LABEL_NOISE, "").trim();
+  const words = name.split(/[\s-]+/).filter(Boolean);
+  if (words.length && VENDORS.has(words[0].toLowerCase())) words.shift();
+  const versions = words.filter((word) => VERSION_WORD.test(word));
+  const family = words.filter((word) => !VERSION_WORD.test(word));
+  // No version, several, or nothing left beside one: not a shape we know.
+  return versions.length === 1 && family.length > 0 ? `${family.join(" ")} ${versions[0]}` : name;
+}
+
+export function normalizeChoice<T extends ModelChoice>(choice: T): T {
+  return { ...choice, label: normalizeModelLabel(choice.label) };
+}
+
 /** Model used when the user hasn't picked one. Shared by the server-side config
  * reader and the client-side Settings modal, so both agree on the default. */
 export const DEFAULT_MODEL = "claude-fable-5-1";
 
-/** Bundled fallback used until local agent discovery succeeds. */
-export const MODEL_CHOICES: readonly ModelChoice[] = [
+const BUNDLED: readonly ModelChoice[] = [
   { value: DEFAULT_MODEL, label: "Fable 5.1 (default)", provider: "claude", reasoningEfforts: STANDARD_EFFORTS },
   { value: "claude-opus-5", label: "Opus 5", provider: "claude", reasoningEfforts: STANDARD_EFFORTS },
   { value: "claude-sonnet-5", label: "Sonnet 5", provider: "claude", reasoningEfforts: STANDARD_EFFORTS },
@@ -59,7 +82,11 @@ export const MODEL_CHOICES: readonly ModelChoice[] = [
     reasoningEfforts: ["low", "high"],
     reasoningModels: { low: "gemini-3.1-pro-low", high: "gemini-3.1-pro-high" },
   },
-] as const;
+];
+
+/** Bundled fallback used until local agent discovery succeeds. Normalised like
+ * the discovered entries so the two spellings cannot drift apart. */
+export const MODEL_CHOICES: readonly ModelChoice[] = BUNDLED.map(normalizeChoice);
 
 /** Pure catalog helpers are shared by Settings and the server integrations. */
 export function modelChoice(model: string, catalog: readonly ModelChoice[] = MODEL_CHOICES): ModelChoice | undefined {
