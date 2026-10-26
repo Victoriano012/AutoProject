@@ -60,11 +60,10 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const usesCliDefault = resolveReasoningEffort(model, undefined, choices) === undefined;
   const reasoningMin = reasoningLevels.length > 0 && usesCliDefault ? -1 : 0;
 
+  /** Empty when every provider answered: a working refresh needs no narration. */
   function catalogStatus(result: CatalogResponse) {
     const unavailable = PROVIDERS.filter((p) => result.providers[p.value]?.error).map((p) => p.label);
-    return unavailable.length
-      ? `${unavailable.join(", ")}: using saved models or bundled defaults.`
-      : "Models are up to date. Automatic checks are cached for five minutes.";
+    return unavailable.length ? `${unavailable.join(", ")} unavailable.` : "";
   }
 
   async function refreshModels() {
@@ -180,7 +179,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
               className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm disabled:opacity-50">
               {refreshing ? "Refreshing models…" : "Refresh models"}
             </button>
-            <p role="status" className="mt-2 text-xs text-zinc-500">{catalogMessage}</p>
+            {catalogMessage && <p role="status" className="mt-2 text-xs text-zinc-500">{catalogMessage}</p>}
           </div>
           <div>
             <div className="flex items-center justify-between gap-2">
@@ -200,7 +199,6 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
               value={effectiveEffort ? reasoningLevels.indexOf(effectiveEffort) : reasoningMin}
               disabled={!loaded || busy || refreshing || reasoningLevels.length === 0 || (reasoningLevels.length === 1 && !usesCliDefault)}
               aria-valuetext={effectiveEffort ? REASONING_LABELS[effectiveEffort] : "CLI default"}
-              aria-describedby="reasoning-description"
               onChange={(e) => setReasoningEffort(reasoningLevels[Number(e.target.value)] ?? DEFAULT_REASONING_EFFORT)}
               className="mt-3 block h-2 w-full cursor-pointer accent-violet-600 disabled:cursor-not-allowed disabled:opacity-40"
             />
@@ -210,13 +208,6 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 {reasoningLevels.map((level) => <span key={level}>{REASONING_LABELS[level]}</span>)}
               </div>
             )}
-            <p id="reasoning-description" className="mt-2 text-xs text-zinc-500">
-              {!effectiveEffort
-                ? "No verified reasoning setting is selected; the agent tool uses its default."
-                : effectiveEffort === "ultra"
-                  ? "Maximum reasoning with automatic task delegation."
-                  : "Higher levels spend more time reasoning. Uses High when supported, otherwise the reported default."}
-            </p>
           </div>
           {/* The project's own fields autosave like everything else the person
             * types (browser-owned, see lib/run-state.ts); Save below is for the
@@ -244,7 +235,6 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 placeholder="Server path where the agents work (empty = temp)"
                 value={workspaceDir}
                 onChange={(e) => setProject({ workspaceDir: e.target.value })}
-                title="Directory on the server where the agents work"
               />
             </label>
           )}
@@ -263,7 +253,6 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 </span>
                 <button
                   className="cursor-pointer inline-flex items-center gap-1 rounded-full border border-zinc-300 bg-white hover:border-violet-400 hover:text-violet-600 px-2.5 py-1 text-xs font-medium text-zinc-600 shadow-sm transition-colors"
-                  title="Something every ticket's agent must know"
                   onClick={() => setProject({ notes: [...notes, ""] })}
                 >
                   <span className="text-sm leading-none">＋</span> Add
