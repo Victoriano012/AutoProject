@@ -15,6 +15,7 @@ import {
   type ReasoningEffort,
 } from "@/lib/models";
 import AttachmentEditor from "./AttachmentEditor";
+import { RefreshIcon, Spinner } from "./icons";
 import StatsModal from "./StatsModal";
 
 type CatalogResponse = {
@@ -149,36 +150,44 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
       >
         <h2 className="text-lg font-semibold">Settings</h2>
         <div className="mt-4 space-y-4">
-          <label className="block">
-            <span className="text-sm font-medium text-zinc-700">Model</span>
-            <select
-              className="mt-1 w-full rounded-lg bg-zinc-50 border border-zinc-300 px-2 py-1.5 text-sm outline-none focus:border-zinc-500 disabled:opacity-50"
-              value={model}
-              disabled={!loaded || busy || refreshing}
-              onChange={(e) => {
-                const nextModel = e.target.value;
-                setModel(nextModel);
-                setReasoningEffort(resolveReasoningEffort(nextModel, reasoningEffort, choices) ?? DEFAULT_REASONING_EFFORT);
-              }}
-            >
-              {PROVIDERS.map((provider) => (
-                <optgroup key={provider.value} label={provider.label}>
-                  {choices.filter(
-                    (modelChoice) => modelChoice.provider === provider.value
-                  ).map((modelChoice) => (
-                    <option key={modelChoice.value} value={modelChoice.value}>
-                      {modelChoice.label}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-          </label>
           <div>
-            <button type="button" disabled={refreshing || busy} onClick={() => void refreshModels()}
-              className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm disabled:opacity-50">
-              {refreshing ? "Refreshing models…" : "Refresh models"}
-            </button>
+            <label htmlFor="model" className="text-sm font-medium text-zinc-700">Model</label>
+            <div className="mt-1 flex items-center gap-2">
+              <select
+                id="model"
+                className="min-w-0 flex-1 rounded-lg bg-zinc-50 border border-zinc-300 px-2 py-1.5 text-sm outline-none focus:border-zinc-500 disabled:opacity-50"
+                value={model}
+                disabled={!loaded || busy || refreshing}
+                onChange={(e) => {
+                  const nextModel = e.target.value;
+                  setModel(nextModel);
+                  setReasoningEffort(resolveReasoningEffort(nextModel, reasoningEffort, choices) ?? DEFAULT_REASONING_EFFORT);
+                }}
+              >
+                {PROVIDERS.map((provider) => (
+                  <optgroup key={provider.value} label={provider.label}>
+                    {choices.filter(
+                      (modelChoice) => modelChoice.provider === provider.value
+                    ).map((modelChoice) => (
+                      <option key={modelChoice.value} value={modelChoice.value}>
+                        {modelChoice.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+              <button
+                type="button"
+                title="Refresh models"
+                aria-label="Refresh models"
+                disabled={refreshing || busy}
+                onClick={() => void refreshModels()}
+                className="shrink-0 rounded-lg px-2 py-1.5 text-zinc-600 hover:bg-zinc-200 hover:text-zinc-900 disabled:opacity-50"
+              >
+                {/* Same box either way, so the row does not shift mid-refresh. */}
+                {refreshing ? <Spinner className="h-5 w-5" color="border-zinc-400" /> : <RefreshIcon />}
+              </button>
+            </div>
             {catalogMessage && <p role="status" className="mt-2 text-xs text-zinc-500">{catalogMessage}</p>}
           </div>
           <div>

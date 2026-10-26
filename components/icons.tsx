@@ -157,6 +157,16 @@ export function BoardIcon({ size }: { size?: number }) {
   );
 }
 
+/** Feather "rotate-cw": re-check something that may have changed elsewhere. */
+export function RefreshIcon({ size }: { size?: number }) {
+  return (
+    <Svg size={size}>
+      <polyline points="23 4 23 10 17 10" />
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+    </Svg>
+  );
+}
+
 /** Feather "message-circle": the chat, offered while the board is showing. */
 export function ChatIcon({ size }: { size?: number }) {
   return (
