@@ -24,6 +24,13 @@ export class RunLimiter {
     this.providerLimit = providerLimit;
   }
 
+  /** Swap the limits in place and admit whoever they now allow. */
+  setLimits(totalLimit: () => number, providerLimit: (provider: ModelProvider) => number) {
+    this.totalLimit = totalLimit;
+    this.providerLimit = providerLimit;
+    this.drain();
+  }
+
   acquire(provider: ModelProvider, signal: AbortSignal): Promise<() => void> {
     if (signal.aborted) return Promise.reject(signal.reason);
     return new Promise((resolve, reject) => {
@@ -59,8 +66,12 @@ export class RunLimiter {
   }
 }
 
+const totalLimit = () => positiveInt(process.env.AUTOPROJECT_MAX_RUNS, 100);
+const providerLimit = (provider: ModelProvider) =>
+  positiveInt(process.env[`AUTOPROJECT_MAX_${provider.toUpperCase()}_RUNS`], 100);
+
 const globals = globalThis as unknown as { __autoprojectRunLimiter?: RunLimiter };
-export const runLimiter = globals.__autoprojectRunLimiter ??= new RunLimiter(
-  () => positiveInt(process.env.AUTOPROJECT_MAX_RUNS, 4),
-  (provider) => positiveInt(process.env[`AUTOPROJECT_MAX_${provider.toUpperCase()}_RUNS`], 2),
-);
+export const runLimiter = globals.__autoprojectRunLimiter ??= new RunLimiter(totalLimit, providerLimit);
+// A dev hot reload keeps the cached instance, built by an older copy of this
+// module that may lack `setLimits`, so apply this copy's limits through ours.
+RunLimiter.prototype.setLimits.call(runLimiter, totalLimit, providerLimit);

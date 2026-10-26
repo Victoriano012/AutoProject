@@ -66,6 +66,16 @@ test("capacity limits span providers, preserve FIFO, and discard cancelled waite
   third();
 });
 
+test("raising the limits in place admits the waiters they now allow", async () => {
+  const limiter = new RunLimiter(() => 1, () => 1);
+  const signal = new AbortController().signal;
+  const first = await limiter.acquire("claude", signal);
+  const second = limiter.acquire("claude", signal);
+  limiter.setLimits(() => 2, () => 2);
+  (await second)();
+  first();
+});
+
 test("deleting or completing a card keeps file ownership until the process exits", async () => {
   await fixture(async (dir) => {
     const live = claim(dir);

@@ -60,7 +60,7 @@ AutoProject is designed to run **locally** — projects are folders on your mach
 
 Ticket runs keep ownership of their declared files and worker until the process exits, including after a card is removed or marked done. Duplicate starts cannot open a second agent for the same ticket. Stop Project stops both ticket agents and the project agent, cancels pending work, and pauses waiting tickets; erasing a project waits for its processes and scheduler to finish before removing files.
 
-Ticket and project-agent turns share a limit of **4 active provider calls overall** and **2 per provider**. Set positive integer environment variables on the server to change those limits:
+Ticket and project-agent turns, across every open project, share a limit of **100 active provider calls overall** and **100 per provider** — a safety net against a runaway bug, not a throttle. Set positive integer environment variables on the server to change those limits:
 
 - `AUTOPROJECT_MAX_RUNS`
 - `AUTOPROJECT_MAX_CLAUDE_RUNS`
