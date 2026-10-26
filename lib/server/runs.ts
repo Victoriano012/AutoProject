@@ -6,7 +6,7 @@ import {
   type Project,
   type Ticket,
 } from "../types";
-import { resumableSession } from "../agent-session";
+import { resumableSession } from "./model-settings";
 import { selectedModel } from "../config";
 import { addStats } from "../stats";
 import * as store from "./project-store";

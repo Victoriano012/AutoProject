@@ -6,6 +6,8 @@ import {
   DEFAULT_MODEL,
   DEFAULT_REASONING_EFFORT,
   MODEL_CHOICES,
+  withSelectedModel,
+  type ModelChoice,
   REASONING_LABELS,
   reasoningEffortsForModel,
   resolveReasoningEffort,
@@ -14,6 +16,17 @@ import {
 } from "@/lib/models";
 import AttachmentEditor from "./AttachmentEditor";
 import StatsModal from "./StatsModal";
+
+type CatalogResponse = {
+  models: ModelChoice[];
+  providers: Record<ModelProvider, { source: string; error?: string; lastSuccessAt?: number }>;
+};
+
+async function fetchCatalog(force: boolean, signal?: AbortSignal): Promise<CatalogResponse> {
+  const response = await fetch("/api/models", { method: force ? "POST" : "GET", cache: "no-store", signal });
+  if (!response.ok) throw new Error("Could not refresh models. Keeping the current catalog.");
+  return response.json();
+}
 
 const PROVIDERS: { value: ModelProvider; label: string }[] = [
   { value: "claude", label: "Claude Code" },
@@ -38,22 +51,57 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [showStats, setShowStats] = useState(false);
-  const reasoningLevels = reasoningEffortsForModel(model);
-  const effectiveEffort = resolveReasoningEffort(model, reasoningEffort);
+  const [catalog, setCatalog] = useState<readonly ModelChoice[]>(MODEL_CHOICES);
+  const [refreshing, setRefreshing] = useState(true);
+  const [catalogMessage, setCatalogMessage] = useState("");
+  const choices = withSelectedModel(catalog, model);
+  const reasoningLevels = reasoningEffortsForModel(model, choices);
+  const effectiveEffort = resolveReasoningEffort(model, reasoningEffort, choices);
+  const usesCliDefault = resolveReasoningEffort(model, undefined, choices) === undefined;
+  const reasoningMin = reasoningLevels.length > 0 && usesCliDefault ? -1 : 0;
+
+  function catalogStatus(result: CatalogResponse) {
+    const unavailable = PROVIDERS.filter((p) => result.providers[p.value]?.error).map((p) => p.label);
+    return unavailable.length
+      ? `${unavailable.join(", ")}: using saved models or bundled defaults.`
+      : "Models are up to date. Automatic checks are cached for five minutes.";
+  }
+
+  async function refreshModels() {
+    setRefreshing(true);
+    try {
+      const result = await fetchCatalog(true);
+      setCatalog((previous) => withSelectedModel(result.models, model, previous));
+      setCatalogMessage(catalogStatus(result));
+    } catch (err) {
+      setCatalogMessage(err instanceof Error ? err.message : "Could not refresh models.");
+    } finally { setRefreshing(false); }
+  }
 
   useEffect(() => {
-    void fetch("/api/config")
+    const controller = new AbortController();
+    void fetch("/api/config", { signal: controller.signal, cache: "no-store" })
       .then((res) => {
         if (!res.ok) throw new Error("Could not load settings. Close and try again.");
         return res.json();
       })
-      .then((cfg: { model?: string; reasoningEffort?: ReasoningEffort }) => {
+      .then((cfg: { model?: string; reasoningEffort?: ReasoningEffort; savedReasoningEffort?: ReasoningEffort }) => {
         const savedModel = cfg.model || DEFAULT_MODEL;
+        if (controller.signal.aborted) return;
         setModel(savedModel);
-        setReasoningEffort(resolveReasoningEffort(savedModel, cfg.reasoningEffort) ?? DEFAULT_REASONING_EFFORT);
+        setReasoningEffort(cfg.savedReasoningEffort ?? cfg.reasoningEffort ?? DEFAULT_REASONING_EFFORT);
         setLoaded(true);
       })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Could not load settings."));
+      .catch((err: unknown) => { if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Could not load settings."); });
+    void fetchCatalog(false, controller.signal)
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setCatalog(result.models);
+        setCatalogMessage(catalogStatus(result));
+      })
+      .catch(() => { if (!controller.signal.aborted) setCatalogMessage("Could not refresh models. Using bundled defaults."); })
+      .finally(() => { if (!controller.signal.aborted) setRefreshing(false); });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -105,16 +153,16 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
             <select
               className="mt-1 w-full rounded-lg bg-zinc-50 border border-zinc-300 px-2 py-1.5 text-sm outline-none focus:border-zinc-500 disabled:opacity-50"
               value={model}
-              disabled={!loaded || busy}
+              disabled={!loaded || busy || refreshing}
               onChange={(e) => {
                 const nextModel = e.target.value;
                 setModel(nextModel);
-                setReasoningEffort(resolveReasoningEffort(nextModel, reasoningEffort) ?? DEFAULT_REASONING_EFFORT);
+                setReasoningEffort(resolveReasoningEffort(nextModel, reasoningEffort, choices) ?? DEFAULT_REASONING_EFFORT);
               }}
             >
               {PROVIDERS.map((provider) => (
                 <optgroup key={provider.value} label={provider.label}>
-                  {MODEL_CHOICES.filter(
+                  {choices.filter(
                     (modelChoice) => modelChoice.provider === provider.value
                   ).map((modelChoice) => (
                     <option key={modelChoice.value} value={modelChoice.value}>
@@ -126,38 +174,46 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
             </select>
           </label>
           <div>
+            <button type="button" disabled={refreshing || busy} onClick={() => void refreshModels()}
+              className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm disabled:opacity-50">
+              {refreshing ? "Refreshing models…" : "Refresh models"}
+            </button>
+            <p role="status" className="mt-2 text-xs text-zinc-500">{catalogMessage}</p>
+          </div>
+          <div>
             <div className="flex items-center justify-between gap-2">
               <label htmlFor="reasoning-level" className="text-sm font-medium text-zinc-700">
                 Reasoning level
               </label>
               <span className="text-sm font-medium text-violet-600">
-                {effectiveEffort ? REASONING_LABELS[effectiveEffort] : "Not available"}
+                {effectiveEffort ? REASONING_LABELS[effectiveEffort] : "CLI default"}
               </span>
             </div>
             <input
               id="reasoning-level"
               type="range"
-              min={0}
-              max={Math.max(1, reasoningLevels.length - 1)}
+              min={reasoningMin}
+              max={Math.max(reasoningMin + 1, reasoningLevels.length - 1)}
               step={1}
-              value={effectiveEffort ? reasoningLevels.indexOf(effectiveEffort) : 0}
-              disabled={!loaded || busy || !effectiveEffort}
-              aria-valuetext={effectiveEffort ? REASONING_LABELS[effectiveEffort] : "Not available"}
+              value={effectiveEffort ? reasoningLevels.indexOf(effectiveEffort) : reasoningMin}
+              disabled={!loaded || busy || refreshing || reasoningLevels.length === 0 || (reasoningLevels.length === 1 && !usesCliDefault)}
+              aria-valuetext={effectiveEffort ? REASONING_LABELS[effectiveEffort] : "CLI default"}
               aria-describedby="reasoning-description"
-              onChange={(e) => setReasoningEffort(reasoningLevels[Number(e.target.value)])}
+              onChange={(e) => setReasoningEffort(reasoningLevels[Number(e.target.value)] ?? DEFAULT_REASONING_EFFORT)}
               className="mt-3 block h-2 w-full cursor-pointer accent-violet-600 disabled:cursor-not-allowed disabled:opacity-40"
             />
-            {effectiveEffort && (
+            {reasoningLevels.length > 0 && (
               <div className="mt-2 flex justify-between text-[10px] text-zinc-500" aria-hidden="true">
+                {usesCliDefault && <span>CLI default</span>}
                 {reasoningLevels.map((level) => <span key={level}>{REASONING_LABELS[level]}</span>)}
               </div>
             )}
             <p id="reasoning-description" className="mt-2 text-xs text-zinc-500">
               {!effectiveEffort
-                ? "This model does not offer adjustable reasoning levels."
+                ? "No verified reasoning setting is selected; the agent tool uses its default."
                 : effectiveEffort === "ultra"
                   ? "Maximum reasoning with automatic task delegation."
-                  : "Higher levels spend more time reasoning. Defaults to High."}
+                  : "Higher levels spend more time reasoning. Uses High when supported, otherwise the reported default."}
             </p>
           </div>
           {/* The project's own fields autosave like everything else the person
@@ -258,7 +314,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
           <button
             autoFocus
             className="rounded-lg px-3 py-1.5 text-sm bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-50"
-            disabled={!loaded || busy}
+            disabled={!loaded || busy || refreshing}
             onClick={() => void save()}
           >
             Save

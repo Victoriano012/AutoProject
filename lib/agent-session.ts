@@ -1,4 +1,4 @@
-import { providerForModel, type ModelProvider } from "./models";
+import { providerForModel, type ModelChoice, type ModelProvider } from "./models";
 
 const PREFIX = /^(claude|codex|gemini):(.*)$/;
 
@@ -16,9 +16,10 @@ export function tagSession(provider: ModelProvider, sessionId: string): string {
  * provider. Switching providers therefore starts a clean conversation. */
 export function resumableSession(
   sessionId: string | undefined,
-  model: string
+  model: string,
+  catalog?: readonly ModelChoice[],
 ): { stored: string; raw: string } | undefined {
-  if (!sessionId || sessionProvider(sessionId) !== providerForModel(model)) return;
+  if (!sessionId || sessionProvider(sessionId) !== providerForModel(model, catalog)) return;
   const match = PREFIX.exec(sessionId);
   return { stored: sessionId, raw: match?.[2] ?? sessionId };
 }

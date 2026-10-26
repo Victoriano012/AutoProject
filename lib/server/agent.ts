@@ -3,7 +3,7 @@ import os from "os";
 import path from "path";
 import { type AttachmentPayload, writeAttachments } from "../attachments";
 import { selectedAgentSettings } from "../config";
-import { providerForModel, resolveReasoningEffort } from "../models";
+import { providerForModel, resolveReasoningEffort } from "./model-settings";
 import { streamCodexAgent } from "./codex";
 import { streamGeminiAgent } from "./gemini";
 import { streamClaudeAgent } from "./claude";

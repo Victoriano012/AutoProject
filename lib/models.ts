@@ -1,8 +1,10 @@
 export type ModelProvider = "claude" | "codex" | "gemini";
 
-export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "high";
 export const REASONING_LABELS: Record<ReasoningEffort, string> = {
+  none: "None",
+  minimal: "Minimal",
   low: "Low",
   medium: "Medium",
   high: "High",
@@ -19,13 +21,16 @@ export interface ModelChoice {
   label: string;
   provider: ModelProvider;
   reasoningEfforts: readonly ReasoningEffort[];
+  defaultReasoningEffort?: ReasoningEffort;
+  /** Exact CLI IDs, when reasoning is selected through model variants (agy). */
+  reasoningModels?: Partial<Record<ReasoningEffort, string>>;
 }
 
 /** Model used when the user hasn't picked one. Shared by the server-side config
  * reader and the client-side Settings modal, so both agree on the default. */
 export const DEFAULT_MODEL = "claude-fable-5-1";
 
-/** Models exposed by the locally authenticated coding-agent CLIs. */
+/** Bundled fallback used until local agent discovery succeeds. */
 export const MODEL_CHOICES: readonly ModelChoice[] = [
   { value: DEFAULT_MODEL, label: "Fable 5.1 (default)", provider: "claude", reasoningEfforts: STANDARD_EFFORTS },
   { value: "claude-opus-5", label: "Opus 5", provider: "claude", reasoningEfforts: STANDARD_EFFORTS },
@@ -45,41 +50,59 @@ export const MODEL_CHOICES: readonly ModelChoice[] = [
     label: "Gemini 3.7 Flash",
     provider: "gemini",
     reasoningEfforts: ["low", "medium", "high"],
+    reasoningModels: { low: "gemini-3.7-flash-low", medium: "gemini-3.7-flash-medium", high: "gemini-3.7-flash-high" },
   },
   {
     value: "gemini-3.1-pro-high",
     label: "Gemini 3.1 Pro",
     provider: "gemini",
     reasoningEfforts: ["low", "high"],
+    reasoningModels: { low: "gemini-3.1-pro-low", high: "gemini-3.1-pro-high" },
   },
 ] as const;
 
-/** Verified against Claude's effort docs, Codex's model catalog, and `agy models`.
- * Gemini IDs may already pin an effort; settings control that suffix at launch.
- * Unknown models keep their CLI defaults until their capabilities are known. */
-export function reasoningEffortsForModel(model: string): readonly ReasoningEffort[] {
-  const canonical = model.startsWith("gemini-")
-    ? `${model.replace(/-(low|medium|high)$/, "")}-high`
-    : model;
-  return MODEL_CHOICES.find((choice) => choice.value === canonical)?.reasoningEfforts ?? [];
+/** Pure catalog helpers are shared by Settings and the server integrations. */
+export function modelChoice(model: string, catalog: readonly ModelChoice[] = MODEL_CHOICES): ModelChoice | undefined {
+  return catalog.find((choice) => choice.value === model)
+    ?? catalog.find((choice) => Object.values(choice.reasoningModels ?? {}).includes(model))
+    ?? (model.startsWith("gemini-") && !/-(low|medium|high)$/.test(model)
+      ? catalog.find((choice) => choice.value === `${model.replace(/-(low|medium|high)$/, "")}-high`)
+      : undefined);
 }
 
-/** Old configs and unsupported selections (including model switches) use High. */
-export function resolveReasoningEffort(model: string, effort?: unknown): ReasoningEffort | undefined {
-  const supported = reasoningEffortsForModel(model);
+export function reasoningEffortsForModel(model: string, catalog: readonly ModelChoice[] = MODEL_CHOICES): readonly ReasoningEffort[] {
+  return modelChoice(model, catalog)?.reasoningEfforts ?? [];
+}
+
+export function resolveReasoningEffort(model: string, effort?: unknown, catalog: readonly ModelChoice[] = MODEL_CHOICES): ReasoningEffort | undefined {
+  const choice = modelChoice(model, catalog);
+  const supported = choice?.reasoningEfforts ?? [];
   return supported.find((level) => level === effort)
-    ?? supported.find((level) => level === DEFAULT_REASONING_EFFORT);
+    ?? supported.find((level) => level === DEFAULT_REASONING_EFFORT)
+    ?? supported.find((level) => level === choice?.defaultReasoningEffort);
 }
 
-/** Claude and Gemini model IDs are dispatched to their CLIs. Other configured
- * model IDs are sent through Codex so a user can add a newer Codex model to
- * ~/.autoproject/config.json before this list catches up. */
-export function providerForModel(model: string): ModelProvider {
+/** Explicit discovery metadata takes precedence over legacy ID conventions. */
+export function providerForModel(model: string, catalog: readonly ModelChoice[] = MODEL_CHOICES): ModelProvider {
+  const known = modelChoice(model, catalog);
+  if (known) return known.provider;
   if (model.startsWith("claude-")) return "claude";
-  if (model.startsWith("gemini-") || model.startsWith("gemini")) return "gemini";
+  if (model.startsWith("gemini")) return "gemini";
   return "codex";
 }
 
+/** A missing saved or in-progress selection must remain visible and selectable. */
+export function withSelectedModel(catalog: readonly ModelChoice[], selected: string, previous: readonly ModelChoice[] = MODEL_CHOICES): readonly ModelChoice[] {
+  if (catalog.some((choice) => choice.value === selected)) return catalog;
+  const known = modelChoice(selected, previous);
+  return [...catalog, {
+    ...known,
+    value: selected,
+    label: `${known?.label ?? selected} (saved selection)`,
+    provider: known?.provider ?? providerForModel(selected),
+    reasoningEfforts: known?.reasoningEfforts ?? [],
+  }];
+}
 
 /** Provider capabilities are independent of each model's reasoning choices.
  * Orchestration uses this catalog instead of testing provider names. */

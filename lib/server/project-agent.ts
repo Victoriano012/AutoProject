@@ -1,6 +1,7 @@
 import type { AgentDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { selectedModel } from "../config";
-import { PROVIDER_CAPABILITIES, providerForModel } from "../models";
+import { PROVIDER_CAPABILITIES } from "../models";
+import { providerForModel } from "./model-settings";
 import {
   type AgentRequest,
   type ChatEntry,

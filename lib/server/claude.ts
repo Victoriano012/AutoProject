@@ -1,6 +1,6 @@
 import { query, type ModelUsage, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { resumableSession, tagSession } from "../agent-session";
-import { resolveReasoningEffort } from "../models";
+import { tagSession } from "../agent-session";
+import { resumableSession, resolveReasoningEffort } from "./model-settings";
 import type { AgentEvent, AgentRequest, RunUsage } from "./agent-types";
 
 function describeTool(name: string, input: unknown): string {
@@ -35,7 +35,7 @@ export function claudeReasoningOptions(
   req: Pick<AgentRequest, "model" | "reasoningEffort">
 ): Pick<Options, "effort"> {
   const effort = resolveReasoningEffort(req.model!, req.reasoningEffort);
-  return effort && effort !== "ultra" ? { effort } : {};
+  return effort && effort !== "ultra" && effort !== "none" && effort !== "minimal" ? { effort } : {};
 }
 
 export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<AgentEvent> {

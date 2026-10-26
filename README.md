@@ -20,20 +20,21 @@ npm install
 
 The launcher builds and starts the production app at `http://127.0.0.1:4123`, reusing an existing server on that port. It resolves its checkout from its own location, including symlinks, and opens the browser on macOS or Linux. Use `./bin/autoproject --dev` for development with hot reload, `--port 5000` for another port, or `--no-open` to print the URL. A new production server always builds current source first. Logs go to `~/.autoproject/server.log`; `AUTOPROJECT_STATE_DIR` changes that directory and `AUTOPROJECT_START_TIMEOUT` changes the 60-second readiness timeout.
 
-Choose the agent model in **Settings**. Claude models run through the Claude Agent SDK, GPT-6 Astra and GPT-5.6 models through the Codex CLI, and Gemini 3.7 Flash / 3.1 Pro through the local Antigravity CLI (`agy`); AutoProject does not call any provider's model API directly. The board MCP tool and act-mode subagents are Claude-only — with Codex or Gemini the panel turn falls back to structured output and act mode works alone. Claude runs are capped at a 200k-token context.
+Choose the agent model in **Settings**. Claude models run through the Claude Agent SDK, Codex models through the Codex CLI, and Gemini models through the local Antigravity CLI (`agy`). The board MCP tool and act-mode subagents are Claude-only; Codex and Gemini panel turns use structured output and act mode works alone. Claude runs are capped at a 200k-token context.
 
-The **Reasoning level** slider defaults to **High**, saves with the model, and applies to subsequent agent turns (including resumed sessions). It only offers levels supported by the selected model; switching to a model that cannot use the current level resets it to High.
+Opening Settings automatically checks the model catalog. Checks are cached for **five minutes**, including failed attempts, and **Refresh models** bypasses that interval. Concurrent refresh requests share the in-flight check. Each provider has a **12-second timeout** and fails independently, so an unavailable tool does not discard the other providers' results.
 
-| Models | Reasoning levels |
-| --- | --- |
-| Claude Fable 5.1, Opus 5, Sonnet 5 | Low, Medium, High, Extra high, Max |
-| Claude Haiku 4.5 | No named effort control; slider disabled |
-| GPT-6 Astra, GPT-5.6 Sol, GPT-5.6 Terra | Low, Medium, High, Extra high, Max, Ultra |
-| GPT-5.6 Luna | Low, Medium, High, Extra high, Max |
-| Gemini 3.7 Flash | Low, Medium, High |
-| Gemini 3.1 Pro | Low, High |
+Discovery uses the existing tools and their local authentication, without new API credentials or inference turns:
 
-Capabilities checked on September 17, 2026 against [Claude's effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort), the installed Codex model catalog (`~/.codex/models_cache.json`), and `agy models`. Claude receives the SDK's `effort` option, Codex receives `model_reasoning_effort` ([configuration](https://learn.chatgpt.com/docs/config-file/config-reference)), and Gemini uses its exact effort-specific model slug ([headless CLI](https://antigravity.google/docs/cli/headless/)). Codex Ultra combines maximum reasoning with automatic delegation and requires a supported model/account ([Ultra behavior](https://learn.chatgpt.com/docs/agent-configuration/subagents)). Haiku supports extended thinking, but has no named effort levels; AutoProject leaves its existing thinking behavior unchanged.
+- **Codex:** the installed CLI's [app-server `model/list` RPC](https://learn.chatgpt.com/docs/app-server#list-models-modellist), including pagination and reported reasoning options. New IDs such as `gpt-6.1-sol` appear when returned by that CLI; AutoProject does not maintain a version-specific allowlist.
+- **Claude:** the installed Claude Agent SDK's `supportedModels()`, including aliases, resolved IDs, and supported effort levels.
+- **Gemini:** `agy models`, grouping only the Gemini variants actually listed. Other providers exposed by `agy` are excluded so their routing stays with the existing integrations.
+
+The last successful catalog for each provider is stored in `~/.autoproject/model-catalog.json` and survives server restarts. Discovery failures use that provider's saved catalog, or bundled defaults when it has never succeeded. Settings reports which providers are using a fallback. An unreadable cache falls back to memory or bundled defaults; an unwritable cache still permits discovery for the current server process. The tools may themselves return cached or bundled catalogs; a listed model is not a guarantee of account access.
+
+**Refresh never changes the selected model or writes your settings.** Saved models missing from discovery stay visible as “saved selection,” and previously discovered routing and capabilities are retained in a bounded history. Only Save changes `~/.autoproject/config.json`; selecting a different provider starts a compatible session rather than resuming another provider's session.
+
+The **Reasoning level** control uses the same catalog as config validation and agent execution. It preserves a supported saved level, otherwise uses **High** when supported, then the model's reported default. If capability metadata is unknown, AutoProject leaves reasoning at the CLI default rather than guessing. Claude receives the SDK's `effort`, Codex receives `model_reasoning_effort`, and Gemini receives an exact listed model variant. Reasoning changes apply to subsequent turns, including resumed sessions. Bundled defaults remain available when discovery has never succeeded; refreshed metadata takes precedence over those defaults.
 
 For Claude, the app picks up your local login automatically. On a server, set **one** of:
 

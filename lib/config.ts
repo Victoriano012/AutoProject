@@ -2,7 +2,9 @@ import fs from "fs";
 import { randomUUID } from "node:crypto";
 import os from "os";
 import path from "path";
-import { DEFAULT_MODEL, resolveReasoningEffort, type ReasoningEffort } from "./models";
+import { DEFAULT_MODEL, type ReasoningEffort } from "./models";
+
+import { resolveReasoningEffort } from "./server/model-settings";
 
 /** App-wide settings, shared by every project. */
 const CONFIG = path.join(os.homedir(), ".autoproject", "config.json");

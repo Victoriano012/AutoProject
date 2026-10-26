@@ -1,8 +1,7 @@
 import { type Attachment, type Ticket } from "../types";
-import { resumableSession } from "../agent-session";
+import { resumableSession, providerForModel } from "./model-settings";
 import { selectedModel } from "../config";
 import { addStats } from "../stats";
-import { providerForModel } from "../models";
 import { type RunUsage, streamAgent } from "./agent";
 import * as store from "./project-store";
 import { registry, ticketKey } from "./run-registry";

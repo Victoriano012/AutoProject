@@ -1,5 +1,5 @@
-import { resumableSession, tagSession } from "../agent-session";
-import { resolveReasoningEffort } from "../models";
+import { tagSession } from "../agent-session";
+import { resumableSession, reasoningModel } from "./model-settings";
 import type { AgentEvent, AgentRequest } from "./agent-types";
 import { createCliSession, parseStructured } from "./cli-process";
 
@@ -64,8 +64,7 @@ export function geminiArgs(
   const args = ["--output-format", "stream-json"];
   if (resume) args.push("--conversation", resume.raw);
   // Pin the actual variant: a saved '-high' slug must not override the slider.
-  const effort = resolveReasoningEffort(model, req.reasoningEffort);
-  const selectedModel = effort ? `${model.replace(/-(low|medium|high)$/, "")}-${effort}` : model;
+  const selectedModel = reasoningModel(model, req.reasoningEffort);
   args.push("--model", selectedModel);
   if (schemaPath) args.push("--json-schema", schemaPath);
   if (req.writeAccess) args.push("--dangerously-skip-permissions");

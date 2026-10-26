@@ -1,5 +1,5 @@
-import { resumableSession, tagSession } from "../agent-session";
-import { resolveReasoningEffort } from "../models";
+import { tagSession } from "../agent-session";
+import { resumableSession, resolveReasoningEffort } from "./model-settings";
 import type { AgentEvent, AgentRequest } from "./agent-types";
 import { createCliSession, parseStructured } from "./cli-process";
 

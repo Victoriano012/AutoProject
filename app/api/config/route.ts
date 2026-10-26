@@ -1,10 +1,12 @@
 import { type AppConfig, readConfig, writeConfig } from "@/lib/config";
-import { DEFAULT_MODEL, reasoningEffortsForModel, resolveReasoningEffort } from "@/lib/models";
+import { DEFAULT_MODEL } from "@/lib/models";
+import { reasoningEffortsForModel, resolveReasoningEffort } from "@/lib/server/model-settings";
 
 export async function GET() {
   const config = readConfig();
   return Response.json({
     ...config,
+    savedReasoningEffort: config.reasoningEffort,
     reasoningEffort: resolveReasoningEffort(config.model || DEFAULT_MODEL, config.reasoningEffort),
   });
 }
