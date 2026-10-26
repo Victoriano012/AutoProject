@@ -260,20 +260,34 @@ export async function sendFeedback(
     return;
   }
 
-  await withTicketClaim(dir, ticketId, () => sendFeedbackNow(dir, ticketId, message, logged));
+  await deliverFeedback(dir, ticketId, message, logged);
 }
 
-/** Send human feedback into the ticket's existing agent session. */
+/** Feedback the agent failed on stays queued, so the card's Retry resends it
+ * rather than restarting the ticket from its description, which would drop it.
+ * Set after the claim settles, so the failure waits for Retry like any other. */
+async function deliverFeedback(dir: string, ticketId: string, message: string, logged: boolean): Promise<void> {
+  let failed = false;
+  await withTicketClaim(dir, ticketId, async () => { failed = await sendFeedbackNow(dir, ticketId, message, logged); });
+  if (!failed) return;
+  const key = ticketKey(dir, ticketId);
+  const queued = registry.pendingFeedback.get(key);
+  registry.pendingFeedback.set(key, queued ? `${message}\n\n${queued}` : message);
+  persistFeedback(dir);
+}
+
+/** Send human feedback into the ticket's existing agent session. True when the
+ * agent failed on it. */
 async function sendFeedbackNow(
   dir: string,
   ticketId: string,
   message: string,
   // The message is already on the card's log, written when it was queued.
   logged = false
-): Promise<void> {
+): Promise<boolean> {
   const project = store.getProject(dir);
   const ticket = project?.tickets.find((t) => t.id === ticketId);
-  if (!project || !ticket) return;
+  if (!project || !ticket) return false;
 
   const model = selectedModel();
   const activeSession = resumableSession(sessionFor(project, ticket), model)?.stored;
@@ -314,6 +328,7 @@ async function sendFeedbackNow(
   // An answered ticket can unblock the rest of the board (its files come free)
   // and nothing else here would notice.
   autoRun(dir);
+  return !ok && !aborted;
 }
 
 /** Reject a ticket in review with feedback (the board's red cross): the
@@ -362,7 +377,7 @@ export async function runTicket(dir: string, ticketId: string): Promise<void> {
   if (waiting) {
     registry.pendingFeedback.delete(key);
     persistFeedback(dir);
-    await withTicketClaim(dir, ticketId, () => sendFeedbackNow(dir, ticketId, waiting, true));
+    await deliverFeedback(dir, ticketId, waiting, true);
     return;
   }
 

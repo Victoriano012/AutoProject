@@ -78,6 +78,7 @@ async function runAgentSession(
   let finalText = "";
   let usage: RunUsage | undefined;
   let started: number | undefined;
+  let errorLogged = false;
 
   try {
     await store.flush(dir);
@@ -115,6 +116,7 @@ async function runAgentSession(
         // stop, or their note) is logged below instead.
         if (!ctrl.signal.aborted) {
           store.appendLog(dir, ticketId, { kind: "error", text: ev.message, ts: Date.now() });
+          errorLogged = true;
         }
       }
     }
@@ -122,6 +124,14 @@ async function runAgentSession(
       ok = false;
       finalText = "Stopped by user";
       store.appendLog(dir, ticketId, { kind: "info", text: abortText(key), ts: Date.now() });
+    } else if (!ok && !errorLogged) {
+      // A failed result (a usage limit, an API error) otherwise lands only in
+      // resultSummary, which the card never shows: it would just turn red.
+      store.appendLog(dir, ticketId, {
+        kind: "error",
+        text: finalText || "The agent ended without a result.",
+        ts: Date.now(),
+      });
     }
   } catch (err) {
     ok = false;
