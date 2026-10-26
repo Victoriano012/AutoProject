@@ -4,7 +4,8 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } fr
 import { takeBackDraft } from "@/lib/draft";
 import { agentBusy, agentRequests, cancelRequest, retryRequest, subscribeRuns } from "@/lib/runner";
 import { useStore } from "@/lib/store";
-import type { AgentRequest } from "@/lib/types";
+import type { AgentRequest, ChatEntry, Ticket } from "@/lib/types";
+import { TicketIcon } from "./icons";
 import TranscriptDownload from "./TranscriptDownload";
 
 /**
@@ -141,8 +142,52 @@ function PendingMessage({ request }: { request: AgentRequest }) {
   );
 }
 
+/** The cards one chat entry put on the board: carried on the entry, or — for
+ * entries written before it carried them — resolved from the board by id.
+ * Empty when the entry made no cards, or when an older one's cards are gone
+ * and there are no titles left to show: that entry falls back to its text. */
+function createdTickets(entry: ChatEntry, board: Ticket[]): { id: string; title: string }[] {
+  if (entry.tickets?.length) return entry.tickets;
+  const resolved = (entry.ticketIds ?? []).flatMap((id) => {
+    const title = board.find((t) => t.id === id)?.title;
+    return title ? [{ id, title }] : [];
+  });
+  return resolved.length === (entry.ticketIds?.length ?? 0) ? resolved : [];
+}
+
+/** One card the planner added, in the stream where it appeared: the whole
+ * title, and a click to it on the board. A card since deleted stays readable
+ * but leads nowhere. */
+function CreatedTicket({ id, title, onBoard }: { id: string; title: string; onBoard: boolean }) {
+  const select = useStore((s) => s.select);
+  const setMode = useStore((s) => s.setMode);
+  const row = "flex w-full items-center gap-2 rounded-lg border border-violet-200 bg-violet-50 px-3 py-1.5 text-left text-sm text-violet-900";
+  const body = (
+    <>
+      <span className="shrink-0 text-violet-500">
+        <TicketIcon size={14} />
+      </span>
+      <span className="min-w-0 flex-1 whitespace-pre-wrap">{title}</span>
+    </>
+  );
+  return onBoard ? (
+    <button
+      className={`${row} hover:bg-violet-100`}
+      onClick={() => {
+        select(id);
+        setMode("panel");
+      }}
+    >
+      {body}
+    </button>
+  ) : (
+    <div className={`${row} opacity-60`}>{body}</div>
+  );
+}
+
 function Transcript() {
   const chat = useStore((s) => s.project.chat);
+  const board = useStore((s) => s.project.tickets);
   const busy = useSyncExternalStore(subscribeRuns, agentBusy, () => false);
   // Everything sent that the agent has not been told yet — waiting its turn,
   // waiting for capacity, failed, stopped — shows here dimmed, in the order it
@@ -196,12 +241,27 @@ function Transcript() {
                 {m.text}
               </p>
             );
-          case "info":
-            return (
+          case "info": {
+            // Cards the planner added are the message: one row each, the whole
+            // title, rather than a line of the stream saying how many.
+            const created = createdTickets(m, board);
+            return created.length ? (
+              <div key={i} className="space-y-1">
+                {created.map((t) => (
+                  <CreatedTicket
+                    key={t.id}
+                    id={t.id}
+                    title={t.title}
+                    onBoard={board.some((b) => b.id === t.id)}
+                  />
+                ))}
+              </div>
+            ) : (
               <p key={i} className="truncate font-mono text-xs italic text-zinc-400">
                 {m.text}
               </p>
             );
+          }
           case "error":
             return (
               <p key={i} className="font-mono text-sm text-red-600 whitespace-pre-wrap">

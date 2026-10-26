@@ -122,7 +122,12 @@ export interface Ticket {
 /** One line of the project agent's conversation, shared by both modes. */
 export interface ChatEntry extends LogEntry {
   mode: Mode;
-  /** Set on the "info" entry the planner writes after adding tickets. */
+  /** The cards the planner put on the board with this entry, in the order it
+   * added them: the chat draws one row each. Carried here so a row reads the
+   * same whatever has happened to the board since. */
+  tickets?: { id: string; title: string }[];
+  /** What entries written before `tickets` carry instead; their titles are
+   * resolved from the board. */
   ticketIds?: string[];
 }
 

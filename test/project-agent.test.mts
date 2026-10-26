@@ -445,3 +445,44 @@ test("a sent message is marked heard only when the agent is told it, and that su
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("tickets the planner adds are carried on the chat entry, with their titles", async () => {
+  const fs = await import("node:fs");
+  const { writeProject } = await import("../lib/projects-fs.ts");
+  const store = await import("../lib/server/project-store.ts");
+  const { registry } = await import("../lib/server/runs.ts");
+  const { addTicketsToBoard } = await import("../lib/server/board-tools.ts");
+  const { defaultProject } = await import("../lib/types.ts");
+  const dir = mkdtempSync(join(tmpdir(), "autoproject-added-"));
+  writeProject(dir, defaultProject("Added", dir));
+  // The board would start the new cards; this test is about what it says.
+  registry.loops.add(dir);
+  try {
+    const added = addTicketsToBoard(dir, [
+      { title: "Add a cart", description: "Build the cart page.", files: ["src/cart.tsx"] },
+      { title: "Add checkout", description: "Take the money.", files: ["src/checkout.tsx"] },
+    ]);
+    const entry = store.getProject(dir)!.chat.at(-1)!;
+    assert.deepEqual(entry.tickets, [
+      { id: added[0].id, title: "Add a cart" },
+      { id: added[1].id, title: "Add checkout" },
+    ]);
+    // The text stays the entry's own words, for the download and for an entry
+    // whose cards are gone.
+    assert.match(entry.text, /Add a cart; Add checkout/);
+
+    // Through project.json: a transcript read back still has every title.
+    await store.forget(dir);
+    assert.deepEqual(
+      store.getProject(dir)!.chat.at(-1)!.tickets,
+      [
+        { id: added[0].id, title: "Add a cart" },
+        { id: added[1].id, title: "Add checkout" },
+      ]
+    );
+  } finally {
+    registry.loops.delete(dir);
+    await store.forget(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

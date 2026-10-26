@@ -26,7 +26,7 @@ export function addTicketsToBoard(dir: string, tickets: store.PlannedTicket[]): 
       text: `Added ${added.length} ticket(s): ${added.map((t) => t.title).join("; ")}`,
       ts: Date.now(),
       mode: "panel",
-      ticketIds: added.map((t) => t.id),
+      tickets: added.map((t) => ({ id: t.id, title: t.title })),
     },
   ]);
   return added;
