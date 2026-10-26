@@ -162,7 +162,7 @@ function createdTickets(entry: ChatEntry, board: Ticket[]): { id: string; title:
 function CreatedTicket({ id, title, onBoard }: { id: string; title: string; onBoard: boolean }) {
   const select = useStore((s) => s.select);
   const setMode = useStore((s) => s.setMode);
-  const row = "flex w-full items-center gap-2 rounded-lg border border-violet-200 bg-violet-50 px-3 py-1.5 text-left text-sm text-violet-900";
+  const row = "flex w-full items-center gap-2 rounded-lg bg-violet-50 px-3 py-1.5 text-left text-sm text-violet-900";
   const body = (
     <>
       <span className="shrink-0 text-violet-500">
@@ -269,7 +269,7 @@ function Transcript() {
             return created.length ? (
               // Tabbed in: these came out of what was sent, they are not
               // another message in the stream.
-              <div key={i} className="ml-6 space-y-1">
+              <div key={i} className="ml-3 space-y-1">
                 {created.map((t) => (
                   <CreatedTicket
                     key={t.id}
