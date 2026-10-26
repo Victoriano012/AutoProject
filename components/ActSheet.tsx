@@ -96,8 +96,8 @@ function pendingLabel(request: AgentRequest): string {
  * bubble it will become in the transcript, dimmed, under a line saying where
  * it stands. A halted one — failed or stopped — carries the stack's two
  * answers with it, so the chat is not a dead end: send it again, or take the
- * words back into the box. The mode's colour is the transcript's (yellow for
- * the board, blue for the chat): one message looks the same either side of
+ * words back into the box. The mode's colour is the transcript's (amber for
+ * the board, sky for the chat): one message looks the same either side of
  * being heard. */
 function PendingMessage({ request }: { request: AgentRequest }) {
   const halted = request.state === "error" || request.state === "stopped";
