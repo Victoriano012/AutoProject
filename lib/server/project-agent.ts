@@ -174,7 +174,8 @@ async function pumpOnce(dir: string): Promise<void> {
   notifyAgent(dir);
   // The transcript shows the message when the agent actually hears it, so it
   // reads in the order the agent did — and a request cancelled while waiting
-  // was never said at all.
+  // was never said at all. Until then it is `heard: false`, and the chat view
+  // shows the request itself: the wait for capacity is not a silent one.
   const model = selectedModel();
   let releaseCapacity: (() => void) | undefined;
   let error: string | null = null;
@@ -183,6 +184,10 @@ async function pumpOnce(dir: string): Promise<void> {
     releaseCapacity = await runLimiter.acquire(providerForModel(model), ctrl.signal);
     ctrl.signal.throwIfAborted();
     say(dir, req.mode, { kind: "user", text: req.text });
+    // Said at last: the transcript carries the words now, so the chat view
+    // stops drawing its own pending bubble for them and nothing shows twice.
+    req.heard = true;
+    notifyAgent(dir);
     error = await turn(dir, req.mode, req.text, ctrl.signal, model);
   } catch (err) {
     error = String(err);

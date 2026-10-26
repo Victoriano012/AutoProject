@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
-import { agentBusy, agentRequests, subscribeRuns } from "@/lib/runner";
+import { takeBackDraft } from "@/lib/draft";
+import { agentBusy, agentRequests, cancelRequest, retryRequest, subscribeRuns } from "@/lib/runner";
 import { useStore } from "@/lib/store";
 import type { AgentRequest } from "@/lib/types";
 import TranscriptDownload from "./TranscriptDownload";
@@ -75,14 +76,81 @@ export default function ActSheet({ open }: { open: boolean }) {
 
 const NONE: AgentRequest[] = [];
 
+/** What a request that has not reached the agent is doing. */
+function pendingLabel(request: AgentRequest): string {
+  switch (request.state) {
+    case "queued":
+      return "waiting";
+    case "running":
+      return "working…";
+    case "stopped":
+      return "stopped";
+    case "error":
+      return request.error ?? "failed";
+  }
+}
+
+/** A message the person sent that the agent has not been told yet: the same
+ * bubble it will become in the transcript, dimmed, under a line saying where
+ * it stands. A halted one — failed or stopped — carries the stack's two
+ * answers with it, so the chat is not a dead end: send it again, or take the
+ * words back into the box. The mode's colour is the transcript's (amber for
+ * the board, sky for the chat): one message looks the same either side of
+ * being heard. */
+function PendingMessage({ request }: { request: AgentRequest }) {
+  const halted = request.state === "error" || request.state === "stopped";
+  return (
+    <div
+      className={`rounded px-2 py-1 ${request.mode === "panel" ? "bg-amber-100" : "bg-sky-100"}`}
+    >
+      <p className="font-mono text-sm text-zinc-700 whitespace-pre-wrap opacity-50">
+        <span className="text-zinc-400">&gt; </span>
+        {request.text}
+      </p>
+      <p className="flex items-center gap-2 text-xs">
+        <span
+          className={`min-w-0 flex-1 truncate ${
+            request.state === "error" ? "text-red-600" : "text-zinc-500"
+          }`}
+          title={pendingLabel(request)}
+        >
+          {pendingLabel(request)}
+        </span>
+        {halted && (
+          <button
+            className="shrink-0 rounded-md bg-white/60 px-2 py-0.5 text-zinc-700 hover:bg-white"
+            onClick={() => retryRequest(request.id)}
+          >
+            ↻ Retry
+          </button>
+        )}
+        {halted && (
+          <button
+            title="Dismiss and put the text back in the box"
+            className="shrink-0 text-zinc-400 hover:text-red-600"
+            onClick={() => {
+              cancelRequest(request.id);
+              takeBackDraft(request.text);
+            }}
+          >
+            ✕
+          </button>
+        )}
+      </p>
+    </div>
+  );
+}
+
 function Transcript() {
   const chat = useStore((s) => s.project.chat);
   const busy = useSyncExternalStore(subscribeRuns, agentBusy, () => false);
-  // A chat message the running turn could not take (another mode's turn, or a
-  // CLI with no way in mid-turn) waits in the queue; it shows here, dimmed,
-  // until its turn starts and writes it to the transcript for real.
+  // Everything sent that the agent has not been told yet — waiting its turn,
+  // waiting for capacity, failed, stopped — shows here dimmed, in the order it
+  // was sent, until the turn says it to the agent and the transcript carries
+  // it for real. `heard`, not the state: a request is "running" for the whole
+  // wait for capacity, and that wait used to show nothing at all.
   const requests = useSyncExternalStore(subscribeRuns, agentRequests, () => NONE);
-  const waiting = requests.filter((r) => r.mode === "act" && r.state === "queued");
+  const pending = requests.filter((r) => !r.heard);
   const listRef = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const [pageEnd, setPageEnd] = useState<number | null>(null);
@@ -91,7 +159,7 @@ function Transcript() {
 
   useEffect(() => {
     if (pinned.current) listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [chat, waiting.length, busy, pageEnd]);
+  }, [chat, pending.length, busy, pageEnd]);
 
   return (
     <div ref={listRef} className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2" onScroll={() => {
@@ -158,15 +226,8 @@ function Transcript() {
         pinned.current = true;
         setPageEnd(null);
       }}>Jump to latest</button>}
-      {waiting.map((r) => (
-        <p
-          key={r.id}
-          title="Waiting for the agent's current turn to end"
-          className="rounded bg-sky-100 px-2 py-1 font-mono text-sm text-zinc-700 whitespace-pre-wrap opacity-50"
-        >
-          <span className="text-zinc-400">&gt; </span>
-          {r.text}
-        </p>
+      {pending.map((r) => (
+        <PendingMessage key={r.id} request={r} />
       ))}
       {busy && (
         <p className="font-mono text-sm text-zinc-500 animate-pulse whitespace-pre-wrap">

@@ -19,6 +19,12 @@ export interface AgentRequest {
   mode: Mode;
   text: string;
   state: "queued" | "running" | "stopped" | "error";
+  /** True once the agent has been told this text and the transcript carries
+   * it (see `say` in project-agent.ts). Until then the chat view draws the
+   * request itself, so a message is on screen from the moment it is sent —
+   * the state does not say this: a request is "running" for the whole wait
+   * for capacity, before the agent hears a word of it. */
+  heard?: boolean;
   /** Why the turn failed; set with `state: "error"` only. */
   error?: string;
 }

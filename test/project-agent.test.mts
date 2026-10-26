@@ -395,3 +395,53 @@ test("stopping the project keeps the whole stack stopped, and run sends it again
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a sent message is marked heard only when the agent is told it, and that survives a restart", async () => {
+  const fs = await import("node:fs");
+  const { writeProject } = await import("../lib/projects-fs.ts");
+  const store = await import("../lib/server/project-store.ts");
+  const { ensureLoaded, notifyAgent, registry, runState } = await import("../lib/server/runs.ts");
+  const { sendToAgent } = await import("../lib/server/project-agent.ts");
+  const { defaultProject } = await import("../lib/types.ts");
+  const dir = mkdtempSync(join(tmpdir(), "autoproject-heard-"));
+  writeProject(dir, defaultProject("Heard", dir));
+  const releaseSlot = await holdEveryRunSlot();
+  const stack = () => runState(dir).agent.requests.map((r) => [r.text, r.state, r.heard ?? false]);
+  try {
+    sendToAgent(dir, "act", "Rename the file");
+    await until(() => registry.agents.has(dir), "the request was never dispatched");
+    // The window the chat view used to show nothing: dispatched and waiting
+    // for capacity, so "running", but not a word of it said to the agent yet.
+    assert.deepEqual(stack(), [["Rename the file", "running", false]]);
+    assert.equal(store.getProject(dir)!.chat.length, 0);
+
+    // The fast path hands a chat message to the live turn and makes no
+    // request at all: it is in the transcript, so there is nothing pending to
+    // draw a second bubble from.
+    registry.inputs.set(dir, () => true);
+    assert.equal(sendToAgent(dir, "act", "And the tests"), null);
+    registry.inputs.delete(dir);
+    assert.deepEqual(stack(), [["Rename the file", "running", false]]);
+    assert.deepEqual(store.getProject(dir)!.chat.map((c) => c.text), ["And the tests"]);
+
+    // What the turn does once the agent is finally told it (see pumpOnce).
+    registry.requests.get(dir)![0].heard = true;
+    notifyAgent(dir);
+    assert.deepEqual(stack(), [["Rename the file", "running", true]]);
+
+    // Through project.json and a restart: the interrupted turn is parked for
+    // a retry, and still known to have reached the transcript — the chat
+    // shows the line it wrote, not a pending bubble repeating it.
+    await store.forget(dir);
+    registry.requests.delete(dir);
+    ensureLoaded(dir);
+    assert.deepEqual(stack(), [["Rename the file", "error", true]]);
+  } finally {
+    registry.agents.get(dir)?.abort();
+    await registry.agentTasks.get(dir);
+    releaseSlot();
+    registry.requests.delete(dir);
+    await store.forget(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

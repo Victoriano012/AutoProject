@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { onTakeBackDraft } from "@/lib/draft";
 import { agentBusy, agentSubagents, sendToAgent, stopAgent, subscribeRuns } from "@/lib/runner";
 import { useStore } from "@/lib/store";
 import type { LiveSubagent } from "@/lib/types";
@@ -111,9 +112,19 @@ export default function BottomBar() {
     if (!(await sendToAgent(mode, text))) setDraft(text);
   }
 
-  /** Words handed back by a dropped request go into the box, after any typing. */
-  const takeBack = (text: string) =>
-    setDraft(draft.trim() ? `${draft.trim()} ${text}` : text);
+  /** Words handed back by a dropped request go into the box, after any typing.
+   * Whichever view dismissed it: the chat's pending bubbles are in the sheet,
+   * which has no way to this box of its own (see lib/draft.ts). */
+  const takeBack = useCallback(
+    (text: string) =>
+      setDraftState((current) => {
+        const next = current.trim() ? `${current.trim()} ${text}` : text;
+        writeDraft(projectId, next);
+        return next;
+      }),
+    [projectId]
+  );
+  useEffect(() => onTakeBackDraft(takeBack), [takeBack]);
 
   return (
     <div className="shrink-0" style={{ margin: "0 5px 5px" }}>
