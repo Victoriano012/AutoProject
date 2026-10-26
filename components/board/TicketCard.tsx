@@ -5,6 +5,7 @@ import type { BoardColumn, FileClaim, Ticket, TicketStatus, Worker } from "@/lib
 import type { FileBlockee } from "@/lib/board-index";
 import ConfirmDialog from "../ConfirmDialog";
 import { LogView } from "../LogView";
+import TranscriptDownload from "../TranscriptDownload";
 import { HandIcon, NoteIcon, Spinner, StopSquare } from "../icons";
 import CardComposer from "./CardComposer";
 import { useTicketActions } from "./useTicketActions";
@@ -12,7 +13,13 @@ import { useTicketActions } from "./useTicketActions";
 const EMPTY_LOG: Ticket["log"] = [];
 function CardLog({ id }: { id: string }) {
   const entries = useStore((s) => s.project.tickets.find((t) => t.id === id)?.log ?? EMPTY_LOG);
-  return <LogView entries={entries} ticketId={id} />;
+  return <LogView entries={entries} />;
+}
+
+function CardTranscript({ id }: { id: string }) {
+  const hasLog = useStore((s) => (s.project.tickets.find((t) => t.id === id)?.log?.length ?? 0) > 0);
+  if (!hasLog) return null;
+  return <TranscriptDownload ticketId={id} />;
 }
 
 const fileLines = (
@@ -46,6 +53,7 @@ function TicketCard({ t, column, worker, busy, claimsForTicket, blockeesForTicke
 }) {
   const selected = useStore((s) => s.selectedId === t.id);
   const selectedId = selected ? t.id : null;
+  const transcript = t.id === selectedId ? <CardTranscript id={t.id} /> : null;
   const { select } = useStore.getState();
   const registerCard = useCallback((el: HTMLDivElement | null) => register(t.id, el), [register, t.id]);
   const [confirmDelete, setConfirmDelete] = useState<Ticket | null>(null);
@@ -149,7 +157,8 @@ function TicketCard({ t, column, worker, busy, claimsForTicket, blockeesForTicke
         // Every reason this card is not moving, stacked; the way
         // back out (paused only) sits on the last of them.
         <div className="mt-2 flex items-end justify-between gap-2 text-[11px]">
-          <div className="min-w-0 space-y-0.5 text-zinc-400">
+          {transcript}
+          <div className="min-w-0 flex-1 space-y-0.5 text-zinc-400">
             {t.paused && (
               <div>{t.status === "running" ? "Stopping…" : "Paused"}</div>
             )}
@@ -203,7 +212,8 @@ function TicketCard({ t, column, worker, busy, claimsForTicket, blockeesForTicke
         // The spinner alone says the agent is on it; stop sits
         // beside it, on the right where the eye already is.
         <div className="mt-2 flex items-end justify-between gap-2 text-[11px]">
-          <div className="min-w-0 space-y-0.5">
+          {transcript}
+          <div className="min-w-0 flex-1 space-y-0.5">
             {t.status === "error" ? (
               <div className="text-red-500">Failed</div>
             ) : t.status === "running" ? null : (
@@ -270,24 +280,31 @@ function TicketCard({ t, column, worker, busy, claimsForTicket, blockeesForTicke
               tone="reject"
             />
           ) : (
-            <div className="flex items-center gap-1.5">
-              <button
-                className="flex-1 rounded-md bg-emerald-100 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-200"
-                title="Approve — mark done"
-                onClick={() => submitApprove(t)}
-              >
-                ✓
-              </button>
-              <button
-                className="flex-1 rounded-md bg-red-100 py-1 text-xs font-medium text-red-600 hover:bg-red-200"
-                title="Reject — describe what's wrong"
-                onClick={() => setOpenBox({ id: t.id, kind: "reject" })}
-              >
-                ✕
-              </button>
+            <div className="flex items-center gap-2">
+              {transcript}
+              <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                <button
+                  className="flex-1 rounded-md bg-emerald-100 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-200"
+                  title="Approve — mark done"
+                  onClick={() => submitApprove(t)}
+                >
+                  ✓
+                </button>
+                <button
+                  className="flex-1 rounded-md bg-red-100 py-1 text-xs font-medium text-red-600 hover:bg-red-200"
+                  title="Reject — describe what's wrong"
+                  onClick={() => setOpenBox({ id: t.id, kind: "reject" })}
+                >
+                  ✕
+                </button>
+              </div>
             </div>
           )}
         </div>
+      )}
+
+      {column !== "blocked" && column !== "working" && column !== "review" && transcript && (
+        <div className="mt-2">{transcript}</div>
       )}
     </div>
   </div>

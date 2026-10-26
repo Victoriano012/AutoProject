@@ -46,10 +46,10 @@ export default function TranscriptDownload({ ticketId }: { ticketId?: string }) 
       setBusy(false);
     }
   }
-  return <div className="text-[11px]" onClick={(e) => e.stopPropagation()}>
-    <button disabled={busy} className="text-violet-600 disabled:text-zinc-400" onClick={() => void download()}>
+  return <div className="flex min-w-0 items-center gap-1 text-[11px]" onClick={(e) => e.stopPropagation()}>
+    <button disabled={busy} className="shrink-0 text-violet-600 disabled:text-zinc-400" onClick={() => void download()}>
       {busy ? "Downloading…" : "Download transcript"}
     </button>
-    {error && <p role="alert" className="text-red-600">{error}</p>}
+    {error && <span role="alert" title={error} className="min-w-0 truncate text-red-600">{error}</span>}
   </div>;
 }

@@ -2,7 +2,6 @@
 
 import { useLayoutEffect, useRef, useState } from "react";
 import { LogEntry } from "@/lib/types";
-import TranscriptDownload from "./TranscriptDownload";
 
 /**
  * An agent transcript: the card's log, shown on the card the person pressed,
@@ -15,7 +14,7 @@ import TranscriptDownload from "./TranscriptDownload";
  * the person has scrolled up to read, which stops the following until they
  * come back to the bottom.
  */
-export function LogView({ entries: log, ticketId }: { entries: LogEntry[]; ticketId?: string }) {
+export function LogView({ entries: log }: { entries: LogEntry[] }) {
   const ref = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const [pageEnd, setPageEnd] = useState<number | null>(null);
@@ -34,8 +33,6 @@ export function LogView({ entries: log, ticketId }: { entries: LogEntry[]; ticke
     );
   }
   return (
-    <>
-    <TranscriptDownload ticketId={ticketId} />
     <div
       ref={ref}
       // Reading and scrolling the log is not a press on the card: dragging its
@@ -107,6 +104,5 @@ export function LogView({ entries: log, ticketId }: { entries: LogEntry[]; ticke
         setPageEnd(null);
       }}>Jump to latest</button>}
     </div>
-    </>
   );
 }
