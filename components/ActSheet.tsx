@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { takeBackDraft } from "@/lib/draft";
 import { modeColors } from "@/lib/mode-colors";
 import { agentBusy, agentRequests, cancelRequest, retryRequest, subscribeRuns } from "@/lib/runner";
@@ -186,8 +186,30 @@ function CreatedTicket({ id, title, onBoard }: { id: string; title: string; onBo
   );
 }
 
+/** The stream with every turn's new cards at the end of it. The planner writes
+ * them the moment the tool runs, which drops them in the middle of its answer,
+ * before the words that explain them; read back, the cards belong after. Each
+ * entry keeps its own index as its key, so moving one does not remount it. */
+function cardsLast(chat: ChatEntry[]): { entry: ChatEntry; key: number }[] {
+  const out: { entry: ChatEntry; key: number }[] = [];
+  let held: { entry: ChatEntry; key: number }[] = [];
+  chat.forEach((entry, key) => {
+    // The next thing sent closes the turn before it: its cards land here.
+    if (entry.kind === "user") {
+      out.push(...held);
+      held = [];
+    }
+    if (entry.kind === "info" && (entry.tickets?.length || entry.ticketIds?.length))
+      held.push({ entry, key });
+    else out.push({ entry, key });
+  });
+  out.push(...held);
+  return out;
+}
+
 function Transcript() {
   const chat = useStore((s) => s.project.chat);
+  const stream = useMemo(() => cardsLast(chat), [chat]);
   const board = useStore((s) => s.project.tickets);
   const busy = useSyncExternalStore(subscribeRuns, agentBusy, () => false);
   // Everything sent that the agent has not been told yet — waiting its turn,
@@ -200,7 +222,7 @@ function Transcript() {
   const listRef = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const [pageEnd, setPageEnd] = useState<number | null>(null);
-  const end = Math.min(pageEnd ?? chat.length, chat.length);
+  const end = Math.min(pageEnd ?? stream.length, stream.length);
   const start = Math.max(0, end - 200);
 
   useEffect(() => {
@@ -218,8 +240,7 @@ function Transcript() {
         setPageEnd(Math.max(200, start));
         if (listRef.current) listRef.current.scrollTop = 0;
       }}>Show earlier messages ({start} older)</button>}
-      {chat.slice(start, end).map((m, index) => {
-        const i = start + index;
+      {stream.slice(start, end).map(({ entry: m, key: i }) => {
         switch (m.kind) {
           case "user":
             // The two modes do different things with what was sent, so each
@@ -278,12 +299,12 @@ function Transcript() {
             );
         }
       })}
-      {end < chat.length && <button className="text-sm text-violet-600" onClick={() => {
-        const next = Math.min(chat.length, end + 200);
-        pinned.current = next === chat.length;
-        setPageEnd(next === chat.length ? null : next);
+      {end < stream.length && <button className="text-sm text-violet-600" onClick={() => {
+        const next = Math.min(stream.length, end + 200);
+        pinned.current = next === stream.length;
+        setPageEnd(next === stream.length ? null : next);
         if (listRef.current) listRef.current.scrollTop = 0;
-      }}>Show newer messages ({chat.length - end} newer)</button>}
+      }}>Show newer messages ({stream.length - end} newer)</button>}
       {pageEnd !== null && <button className="ml-2 text-sm text-violet-600" onClick={() => {
         pinned.current = true;
         setPageEnd(null);
