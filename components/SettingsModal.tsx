@@ -71,7 +71,9 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
     setRefreshing(true);
     try {
       const result = await fetchCatalog(true);
-      setCatalog((previous) => withSelectedModel(result.models, model, previous));
+      // Store the raw catalog: `choices` appends the saved selection at render,
+      // so re-appending here would re-wrap its label on every refresh.
+      setCatalog(result.models);
       setCatalogMessage(catalogStatus(result));
     } catch (err) {
       setCatalogMessage(err instanceof Error ? err.message : "Could not refresh models.");
@@ -122,7 +124,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
       const res = await fetch("/api/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model, reasoningEffort: effectiveEffort }),
+        body: JSON.stringify({ model, reasoningEffort: effectiveEffort ?? null }),
       });
       if (!res.ok) throw new Error("Could not save settings. Please try again.");
       onClose();

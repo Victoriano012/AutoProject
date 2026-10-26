@@ -153,15 +153,17 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 test("CLI discovery is bounded and rejects missing tools and malformed responses", async (t) => {
   const dir = fixture(t);
   const executable = path.join(dir, "fake-tool");
+  // The 80ms cases below assert the bound; these assert the rejection reason, so
+  // they get room for process start-up when the whole suite runs in parallel.
   setEnv(t, "AUTOPROJECT_CODEX_PATH", path.join(dir, "missing"));
-  await assert.rejects(discoverCodex(500), /could not start/);
+  await assert.rejects(discoverCodex(10_000), /could not start/);
   fs.writeFileSync(executable, '#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n', { mode: 0o700 });
   setEnv(t, "AUTOPROJECT_CODEX_PATH", executable);
   await assert.rejects(discoverCodex(80), /timed out/);
   setEnv(t, "AUTOPROJECT_AGY_PATH", executable);
   await assert.rejects(discoverGemini(80), /failed/);
   fs.writeFileSync(executable, '#!/usr/bin/env node\nconsole.log("not-json");setInterval(() => {}, 1000);\n');
-  await assert.rejects(discoverCodex(500), /Invalid/);
+  await assert.rejects(discoverCodex(10_000), /Invalid/);
 });
 
 test("an unwritable cache preserves successful discovery in memory", async (t) => {

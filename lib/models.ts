@@ -82,23 +82,31 @@ export function resolveReasoningEffort(model: string, effort?: unknown, catalog:
     ?? supported.find((level) => level === choice?.defaultReasoningEffort);
 }
 
+/** Claude's CLI aliases carry no provider prefix, so a saved `opus` would fall
+ * through to the Codex branch whenever the catalog is unavailable. */
+const CLAUDE_ALIASES = new Set(["default", "opus", "opusplan", "sonnet", "haiku", "fable"]);
+
 /** Explicit discovery metadata takes precedence over legacy ID conventions. */
 export function providerForModel(model: string, catalog: readonly ModelChoice[] = MODEL_CHOICES): ModelProvider {
   const known = modelChoice(model, catalog);
   if (known) return known.provider;
-  if (model.startsWith("claude-")) return "claude";
+  if (model.startsWith("claude-") || CLAUDE_ALIASES.has(model)) return "claude";
   if (model.startsWith("gemini")) return "gemini";
   return "codex";
 }
 
-/** A missing saved or in-progress selection must remain visible and selectable. */
+const SAVED_SUFFIX = " (saved selection)";
+
+/** A missing saved or in-progress selection must remain visible and selectable.
+ * `previous` may already be a labelled result, so the suffix is applied once. */
 export function withSelectedModel(catalog: readonly ModelChoice[], selected: string, previous: readonly ModelChoice[] = MODEL_CHOICES): readonly ModelChoice[] {
   if (catalog.some((choice) => choice.value === selected)) return catalog;
   const known = modelChoice(selected, previous);
+  const label = known?.label ?? selected;
   return [...catalog, {
     ...known,
     value: selected,
-    label: `${known?.label ?? selected} (saved selection)`,
+    label: label.endsWith(SAVED_SUFFIX) ? label : `${label}${SAVED_SUFFIX}`,
     provider: known?.provider ?? providerForModel(selected),
     reasoningEfforts: known?.reasoningEfforts ?? [],
   }];

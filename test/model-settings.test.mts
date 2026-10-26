@@ -9,6 +9,7 @@ import { codexArgs } from "../lib/server/codex.ts";
 import { geminiArgs } from "../lib/server/gemini.ts";
 import { claudeReasoningOptions } from "../lib/server/claude.ts";
 import { providerForModel, resumableSession } from "../lib/server/model-settings.ts";
+import { providerForModel as bundledProviderForModel, withSelectedModel } from "../lib/models.ts";
 
 test("Settings, config validation, sessions and execution share discovered metadata; refresh preserves saved settings", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "autoproject-discovered-settings-"));
@@ -60,4 +61,45 @@ test("Settings, config validation, sessions and execution share discovered metad
   const response = await (await modelsRoute.GET()).json();
   assert.equal(response.models.at(-1).value, "saved-unlisted-model");
   assert.deepEqual(readConfig(), { model: "saved-unlisted-model" });
+});
+
+test("an explicit CLI default clears the saved level, while an omitted level survives a model switch", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "autoproject-cli-default-"));
+  t.mock.method(os, "homedir", () => home);
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  // `lite` reports levels but no High and no default, so its slider offers "CLI default".
+  const rows: ModelChoice[] = [
+    { value: "gpt-lite", label: "Lite", provider: "codex", reasoningEfforts: ["low", "medium"] },
+    { value: "gpt-full", label: "Full", provider: "codex", reasoningEfforts: ["low", "high"] },
+  ];
+  const cache = createModelCatalog({ file: () => path.join(home, "catalog.json"), discover: async (p) => rows.filter((m) => m.provider === p) });
+  const snapshot = await cache.refresh();
+  t.mock.method(modelCatalog, "read", () => snapshot);
+  const { GET, PUT } = await import("../app/api/config/route.ts");
+  const { readConfig, writeConfig } = await import("../lib/config.ts");
+  const put = (body: unknown) => PUT(new Request("http://localhost/api/config", { method: "PUT", body: JSON.stringify(body) }));
+
+  writeConfig({ model: "gpt-lite", reasoningEffort: "low" });
+  assert.equal((await put({ model: "gpt-lite", reasoningEffort: null })).status, 200);
+  assert.deepEqual(readConfig(), { model: "gpt-lite" });
+  assert.equal((await (await GET()).json()).reasoningEffort, undefined);
+  assert.equal(codexArgs({ model: "gpt-lite" }).includes("--config"), false);
+
+  // A model with a resolvable default cannot be forced below it.
+  assert.equal((await put({ model: "gpt-full", reasoningEffort: null })).status, 200);
+  assert.equal(readConfig().reasoningEffort, "high");
+  // An omitted level keeps the saved one instead of failing validation on switch.
+  assert.equal((await put({ model: "gpt-lite" })).status, 200);
+  assert.equal(readConfig().reasoningEffort, undefined);
+});
+
+test("saved selections keep one label and stay on their own provider without a catalog", () => {
+  const catalog: ModelChoice[] = [{ value: "gpt-full", label: "Full", provider: "codex", reasoningEfforts: ["high"] }];
+  let listed = withSelectedModel(catalog, "retired-model");
+  for (let i = 0; i < 3; i++) listed = withSelectedModel(catalog, "retired-model", listed);
+  assert.deepEqual(listed.map((m) => m.label), ["Full", "retired-model (saved selection)"]);
+  // Claude's aliases carry no prefix; an empty catalog must not route them to Codex.
+  for (const alias of ["opus", "sonnet", "haiku", "default"]) assert.equal(bundledProviderForModel(alias, []), "claude");
+  assert.equal(bundledProviderForModel("gpt-6.1-sol", []), "codex");
+  assert.equal(bundledProviderForModel("gemini-3.8-flash-high", []), "gemini");
 });
