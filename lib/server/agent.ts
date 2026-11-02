@@ -11,7 +11,8 @@ import type { AgentEvent, AgentProvider, AgentRequest, AgentResult } from "./age
 export type { AgentEvent, AgentProvider, AgentRequest, AgentResult, RunUsage } from "./agent-types";
 export { claudeReasoningOptions } from "./claude";
 
-const providers: Record<ReturnType<typeof providerForModel>, AgentProvider> = {
+/** Exported so tests can stand in a fake provider. */
+export const providers: Record<ReturnType<typeof providerForModel>, AgentProvider> = {
   claude: { stream: streamClaudeAgent },
   codex: { stream: streamCodexAgent },
   gemini: { stream: streamGeminiAgent },

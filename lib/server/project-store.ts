@@ -233,8 +233,9 @@ export function addTickets(dir: string, tickets: PlannedTicket[]): Ticket[] {
   return added;
 }
 
-/** A worker's conversation moved on (its agent reached init on a ticket). */
-export function setWorkerSession(dir: string, workerId: string, sessionId: string): void {
+/** A worker's conversation moved on (its agent reached init on a ticket), or
+ * is gone (undefined: the CLI no longer has it). */
+export function setWorkerSession(dir: string, workerId: string, sessionId: string | undefined): void {
   const e = entry(dir);
   const w = e?.project.workers.find((x) => x.id === workerId);
   if (!e || !w || w.sessionId === sessionId) return;

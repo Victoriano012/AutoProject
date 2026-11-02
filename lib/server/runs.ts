@@ -130,6 +130,8 @@ async function runTicketOnce(dir: string, ticketId: string): Promise<void> {
     prompt,
     // The worker's conversation, so it keeps what its earlier tickets taught it.
     sessionId: resumableSession(workerOf(project, ticket)?.sessionId, model)?.stored,
+    // Asked once that conversation is forgotten, so it claims no earlier tickets.
+    freshPrompt: () => ticketPrompt(store.getProject(dir) ?? project, ticket),
     attachments: inheritedAttachments(project, ticket),
     model,
   });
@@ -311,6 +313,13 @@ async function sendFeedbackNow(
       ? `${opening}\n\nThe human is starting this ticket with a request:\n\n${message}`
       : `Human review feedback on your work for this ticket:\n\n${message}\n\nAddress the feedback, then end with a short summary of what you changed.`,
     sessionId: activeSession,
+    // That conversation is gone: a new one reads the ticket first.
+    freshPrompt: () =>
+      `${ticketPrompt(store.getProject(dir) ?? project, ticket)}\n\n` +
+      (opening
+        ? "The human is starting this ticket with a request"
+        : "Earlier work on this ticket is already in the workspace. Human review feedback on it") +
+      `:\n\n${message}`,
     model,
   });
 

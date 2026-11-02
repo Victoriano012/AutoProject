@@ -58,6 +58,18 @@ function recordRun(dir: string, ticketId: string, ms: number, usage?: RunUsage):
 
 // ---- one agent session ----------------------------------------------------
 
+/** The Claude Code CLI's answer to resuming a conversation it no longer has. */
+const MISSING_SESSION = /No conversation found with session ID/;
+
+/** Drop a conversation the CLI no longer has from the ticket and its worker, so
+ * neither resumes it again; the new conversation's init fills them back in. */
+function forgetSession(dir: string, ticketId: string, sessionId: string): void {
+  store.updateTicket(dir, ticketId, (t) => (t.sessionId === sessionId ? { ...t, sessionId: undefined } : t));
+  const workerId = ticketOf(dir, ticketId)?.workerId;
+  const worker = store.getProject(dir)?.workers.find((w) => w.id === workerId);
+  if (worker?.sessionId === sessionId) store.setWorkerSession(dir, worker.id, undefined);
+}
+
 async function runAgentSession(
   dir: string,
   ticketId: string,
@@ -66,6 +78,8 @@ async function runAgentSession(
     sessionId?: string;
     attachments?: Attachment[];
     model?: string;
+    /** What a new conversation is told if `sessionId` turns out to be gone. */
+    freshPrompt?: () => string;
   }
 ): Promise<{ ok: boolean; text: string; aborted: boolean }> {
   const key = ticketKey(dir, ticketId);
@@ -85,40 +99,60 @@ async function runAgentSession(
     releaseCapacity = await runLimiter.acquire(providerForModel(body.model ?? selectedModel()), ctrl.signal);
     ctrl.signal.throwIfAborted();
     started = Date.now();
-    const events = streamAgent({
-      workspaceDir: store.getProject(dir)?.workspaceDir,
-      prompt: body.prompt,
-      sessionId: body.sessionId,
-      attachments: body.attachments?.map(({ name, dataUrl }) => ({ name, dataUrl })),
-      signal: ctrl.signal,
-      model: body.model,
-      writeAccess: true,
-    });
-    for await (const ev of events) {
-      if (ev.type === "init") {
-        store.updateTicket(dir, ticketId, (t) => ({ ...t, sessionId: ev.sessionId }));
-        // The worker's conversation is what its next ticket resumes.
-        const workerId = ticketOf(dir, ticketId)?.workerId;
-        if (workerId) store.setWorkerSession(dir, workerId, ev.sessionId);
-      } else if (ev.type === "text") {
-        store.appendLog(dir, ticketId, { kind: "text", text: ev.text, ts: Date.now() });
-      } else if (ev.type === "tool") {
-        store.appendLog(dir, ticketId, { kind: "tool", text: ev.text, ts: Date.now() });
-      } else if (ev.type === "result") {
-        ok = ev.ok;
-        finalText = ev.text ?? "";
-        usage = ev.usage;
-      } else if (ev.type === "error") {
-        ok = false;
-        finalText = ev.message;
-        // An error the abort itself caused is not the run's own failure — the
-        // CLI reports the interrupt as one. What actually happened (the person's
-        // stop, or their note) is logged below instead.
-        if (!ctrl.signal.aborted) {
-          store.appendLog(dir, ticketId, { kind: "error", text: ev.message, ts: Date.now() });
-          errorLogged = true;
+    let { prompt, sessionId } = body;
+    for (;;) {
+      let expired = false;
+      const events = streamAgent({
+        workspaceDir: store.getProject(dir)?.workspaceDir,
+        prompt,
+        sessionId,
+        attachments: body.attachments?.map(({ name, dataUrl }) => ({ name, dataUrl })),
+        signal: ctrl.signal,
+        model: body.model,
+        writeAccess: true,
+      });
+      for await (const ev of events) {
+        if (ev.type === "init") {
+          store.updateTicket(dir, ticketId, (t) => ({ ...t, sessionId: ev.sessionId }));
+          // The worker's conversation is what its next ticket resumes.
+          const workerId = ticketOf(dir, ticketId)?.workerId;
+          if (workerId) store.setWorkerSession(dir, workerId, ev.sessionId);
+        } else if (ev.type === "text") {
+          store.appendLog(dir, ticketId, { kind: "text", text: ev.text, ts: Date.now() });
+        } else if (ev.type === "tool") {
+          store.appendLog(dir, ticketId, { kind: "tool", text: ev.text, ts: Date.now() });
+        } else if (ev.type === "result") {
+          ok = ev.ok;
+          finalText = ev.text ?? "";
+          usage = ev.usage;
+        } else if (ev.type === "error") {
+          // Claude Code deletes transcripts older than cleanupPeriodDays, so a
+          // worker idle that long has no conversation left to resume.
+          if (sessionId && body.freshPrompt && MISSING_SESSION.test(ev.message) && !ctrl.signal.aborted) {
+            expired = true;
+            continue;
+          }
+          ok = false;
+          finalText = ev.message;
+          // An error the abort itself caused is not the run's own failure — the
+          // CLI reports the interrupt as one. What actually happened (the person's
+          // stop, or their note) is logged below instead.
+          if (!ctrl.signal.aborted) {
+            store.appendLog(dir, ticketId, { kind: "error", text: ev.message, ts: Date.now() });
+            errorLogged = true;
+          }
         }
       }
+      if (!expired || ctrl.signal.aborted) break;
+      forgetSession(dir, ticketId, sessionId!);
+      store.appendLog(dir, ticketId, {
+        kind: "info",
+        text: "This worker's earlier conversation had expired, so a new one was started.",
+        ts: Date.now(),
+      });
+      prompt = body.freshPrompt!();
+      sessionId = undefined;
+      finalText = "";
     }
     if (ctrl.signal.aborted) {
       ok = false;
@@ -168,6 +202,7 @@ export async function runWithNotes(
     sessionId?: string;
     attachments?: Attachment[];
     model: string;
+    freshPrompt?: () => string;
   }
 ): Promise<{ ok: boolean; text: string; aborted: boolean }> {
   const key = ticketKey(dir, ticketId);
