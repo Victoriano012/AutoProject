@@ -54,17 +54,21 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [showStats, setShowStats] = useState(false);
   const [catalog, setCatalog] = useState<readonly ModelChoice[]>(MODEL_CHOICES);
   const [refreshing, setRefreshing] = useState(false);
-  const [catalogMessage, setCatalogMessage] = useState("");
+  const [catalogMessage, setCatalogMessage] = useState<string[]>([]);
   const choices = withSelectedModel(catalog, model);
   const reasoningLevels = reasoningEffortsForModel(model, choices);
   const effectiveEffort = resolveReasoningEffort(model, reasoningEffort, choices);
   const usesCliDefault = resolveReasoningEffort(model, undefined, choices) === undefined;
   const reasoningMin = reasoningLevels.length > 0 && usesCliDefault ? -1 : 0;
 
-  /** Empty when every provider answered: a working refresh needs no narration. */
-  function catalogStatus(result: CatalogResponse) {
-    const unavailable = PROVIDERS.filter((p) => result.providers[p.value]?.error).map((p) => p.label);
-    return unavailable.length ? `${unavailable.join(", ")} unavailable.` : "";
+  /** Empty when every provider answered: a working refresh needs no narration.
+   * A failed one names the provider and what went wrong, because the list it
+   * leaves behind looks exactly like a refresh that found nothing new. */
+  function catalogStatus(result: CatalogResponse): string[] {
+    return PROVIDERS.flatMap((p) => {
+      const error = result.providers[p.value]?.error;
+      return error ? [`${p.label} ${error}.`] : [];
+    });
   }
 
   async function refreshModels() {
@@ -76,7 +80,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
       setCatalog(result.models);
       setCatalogMessage(catalogStatus(result));
     } catch (err) {
-      setCatalogMessage(err instanceof Error ? err.message : "Could not refresh models.");
+      setCatalogMessage([err instanceof Error ? err.message : "Could not refresh models."]);
     } finally { setRefreshing(false); }
   }
 
@@ -101,7 +105,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
         setCatalog(result.models);
         setCatalogMessage(catalogStatus(result));
       })
-      .catch(() => { if (!controller.signal.aborted) setCatalogMessage("Could not load models. Using bundled defaults."); });
+      .catch(() => { if (!controller.signal.aborted) setCatalogMessage(["Could not load models. Using bundled defaults."]); });
     return () => controller.abort();
   }, []);
 
@@ -187,7 +191,9 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 {refreshing ? <Spinner className="h-5 w-5" color="border-zinc-400" /> : <RefreshIcon />}
               </button>
             </div>
-            {catalogMessage && <p role="status" className="mt-2 text-xs text-zinc-500">{catalogMessage}</p>}
+            {catalogMessage.length > 0 && (
+              <p role="status" className="mt-2 text-xs text-red-600">{catalogMessage.join(" ")}</p>
+            )}
           </div>
           <div>
             <div className="flex items-center justify-between gap-2">

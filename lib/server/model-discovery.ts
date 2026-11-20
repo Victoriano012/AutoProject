@@ -1,6 +1,7 @@
 import { spawn, execFile } from "node:child_process";
 import os from "node:os";
 import { query, type ModelInfo, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { DiscoveryError } from "./discovery-error";
 import { normalizeChoice, normalizeModelLabel, REASONING_LABELS, type ModelChoice, type ModelProvider, type ReasoningEffort } from "../models";
 
 export const DISCOVERY_TIMEOUT_MS = 12_000;
@@ -10,7 +11,7 @@ const efforts = (values: unknown): ReasoningEffort[] => Array.isArray(values)
   : [];
 
 export function parseCodexModels(data: unknown): ModelChoice[] {
-  if (!Array.isArray(data)) throw new Error("Invalid Codex catalog");
+  if (!Array.isArray(data)) throw new DiscoveryError("returned an unreadable response");
   return data.flatMap((row) => {
     if (!row || typeof row.model !== "string" || !row.model.trim() || row.hidden === true) return [];
     const reasoningEfforts = efforts(row.supportedReasoningEfforts?.map((e: { reasoningEffort?: unknown }) => e?.reasoningEffort));
@@ -43,17 +44,17 @@ export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelCh
       child.kill("SIGKILL");
       if (error) reject(error); else resolve(models);
     };
-    const timer = setTimeout(() => finish(new Error("Codex discovery timed out")), timeoutMs);
+    const timer = setTimeout(() => finish(new DiscoveryError("timed out")), timeoutMs);
     const send = (message: object) => child.stdin.write(`${JSON.stringify(message)}\n`);
-    child.on("error", () => finish(new Error("Codex could not start")));
-    child.on("exit", () => finish(new Error("Codex exited before discovery completed")));
-    child.stdin.on("error", () => finish(new Error("Codex discovery connection closed")));
+    child.on("error", () => finish(new DiscoveryError("is not installed")));
+    child.on("exit", () => finish(new DiscoveryError("stopped before answering")));
+    child.stdin.on("error", () => finish(new DiscoveryError("stopped before answering")));
     child.stderr.resume(); // Never expose CLI diagnostics (which may contain account details).
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       if (done) return;
       bytes += Buffer.byteLength(chunk);
-      if (bytes > MAX_OUTPUT) return finish(new Error("Codex catalog exceeded size limit"));
+      if (bytes > MAX_OUTPUT) return finish(new DiscoveryError("returned too much data"));
       buffer += chunk;
       let newline: number;
       while (!done && (newline = buffer.indexOf("\n")) >= 0) {
@@ -62,7 +63,7 @@ export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelCh
         try {
           const message = JSON.parse(line);
           if (message.id !== id) continue;
-          if (message.error) return finish(new Error("Codex discovery request failed"));
+          if (message.error) return finish(new DiscoveryError("rejected the request"));
           if (stage === "initialize") {
             stage = "models";
             send({ method: "initialized" });
@@ -72,12 +73,12 @@ export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelCh
             const cursor = message.result?.nextCursor;
             if (cursor == null) return finish();
             if (typeof cursor !== "string" || cursors.has(cursor) || cursors.size >= 20) {
-              return finish(new Error("Invalid Codex pagination"));
+              return finish(new DiscoveryError("returned an unreadable response"));
             }
             cursors.add(cursor);
             send({ id: ++id, method: "model/list", params: { limit: 100, includeHidden: false, cursor } });
           }
-        } catch { finish(new Error("Invalid Codex discovery response")); }
+        } catch { finish(new DiscoveryError("returned an unreadable response")); }
       }
     });
     send({ id, method: "initialize", params: { clientInfo: { name: "autoproject", title: "AutoProject", version: "0.1.0" }, capabilities: null } });
@@ -117,7 +118,7 @@ export async function discoverClaude(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<
   try {
     return await Promise.race([
       session.supportedModels().then(parseClaudeModels),
-      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Claude discovery timed out")), timeoutMs); }),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new DiscoveryError("timed out")), timeoutMs); }),
     ]);
   } finally {
     clearTimeout(timer);
@@ -154,7 +155,9 @@ export function discoverGemini(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelC
   return new Promise((resolve, reject) => {
     execFile(/* turbopackIgnore: true */ executable, ["models"], {
       cwd: os.homedir(), env: process.env, timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: MAX_OUTPUT,
-    }, (error, stdout) => error ? reject(new Error("Gemini discovery failed")) : resolve(parseGeminiModels(stdout)));
+    }, (error, stdout) => error
+      ? reject(new DiscoveryError(error.code === "ENOENT" ? "is not installed" : error.killed ? "timed out" : "failed to answer"))
+      : resolve(parseGeminiModels(stdout)));
   });
 }
 

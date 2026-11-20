@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createModelCatalog, catalogModels, knownModels } from "../lib/server/model-catalog.ts";
+import { DiscoveryError } from "../lib/server/discovery-error.ts";
 import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, latestPerFamily } from "../lib/server/model-discovery.ts";
 import { MODEL_CHOICES, normalizeModelLabel, providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
 
@@ -178,14 +179,14 @@ test("CLI discovery is bounded and rejects missing tools and malformed responses
   // The 80ms cases below assert the bound; these assert the rejection reason, so
   // they get room for process start-up when the whole suite runs in parallel.
   setEnv(t, "AUTOPROJECT_CODEX_PATH", path.join(dir, "missing"));
-  await assert.rejects(discoverCodex(10_000), /could not start/);
+  await assert.rejects(discoverCodex(10_000), /is not installed/);
   fs.writeFileSync(executable, '#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n', { mode: 0o700 });
   setEnv(t, "AUTOPROJECT_CODEX_PATH", executable);
   await assert.rejects(discoverCodex(80), /timed out/);
   setEnv(t, "AUTOPROJECT_AGY_PATH", executable);
-  await assert.rejects(discoverGemini(80), /failed/);
+  await assert.rejects(discoverGemini(80), /timed out/);
   fs.writeFileSync(executable, '#!/usr/bin/env node\nconsole.log("not-json");setInterval(() => {}, 1000);\n');
-  await assert.rejects(discoverCodex(10_000), /Invalid/);
+  await assert.rejects(discoverCodex(10_000), /returned an unreadable response/);
 });
 
 test("an unwritable cache preserves successful discovery in memory", async (t) => {
@@ -237,4 +238,91 @@ test("Claude's Default alias is not a model, and picking it still resolves", () 
   assert.equal(listed.at(-1)?.value, "default");
   assert.equal(listed.at(-1)?.provider, "claude");
   assert.equal(providerForModel("default", models), "claude");
+});
+
+// Captured from the installed CLIs on 2026-11-19: codex 0.160.0, claude 2.1.310,
+// agy 1.4.7. A refresh has to carry a newly released model all the way through.
+const CODEX_ROWS = [
+  { model: "gpt-6.1-terra", displayName: "GPT-6.1 Terra", hidden: false, isDefault: true,
+    supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }, { reasoningEffort: "ultra" }], defaultReasoningEffort: "low" },
+  { model: "gpt-6.1-sol", displayName: "GPT-6.1-Sol", hidden: false,
+    supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }], defaultReasoningEffort: "low" },
+  { model: "gpt-6-sol", displayName: "GPT-6-Sol", hidden: false,
+    supportedReasoningEfforts: [{ reasoningEffort: "low" }], defaultReasoningEffort: "low" },
+  { model: "gpt-reserve", displayName: "GPT-Reserve", hidden: true, supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
+];
+const CLAUDE_ROWS = [
+  { value: "default", resolvedModel: "claude-opus-5", displayName: "Default (recommended)", description: "Opus 5 \u00b7 Best for everyday, complex tasks", supportsEffort: true, supportedEffortLevels: ["low", "high"] },
+  { value: "opus", resolvedModel: "claude-opus-5", displayName: "Opus", description: "Opus 5 \u00b7 Best for everyday, complex tasks", supportsEffort: true, supportedEffortLevels: ["low", "high"] },
+  { value: "claude-fable-5[1m]", resolvedModel: "claude-fable-5[1m]", displayName: "Fable", description: "Fable 5 \u00b7 Most capable for your hardest and longest-running tasks", supportsEffort: true, supportedEffortLevels: ["low", "high"] },
+  { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku", description: "Haiku 4.5 \u00b7 Fastest for quick answers" },
+] as const;
+const AGY_OUTPUT = [
+  "Fetching available models...",
+  "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+  "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)",
+  "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)",
+  "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)",
+  "",
+].join("\n");
+
+test("a newly released model reaches the list Settings renders, for every provider", async (t) => {
+  const dir = fixture(t);
+  let released = false;
+  const discover = async (provider: string): Promise<ModelChoice[]> => {
+    if (provider === "codex") return latestPerFamily(parseCodexModels(
+      released ? [{ model: "gpt-7-nova", displayName: "GPT-7-Nova", hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "high" }], defaultReasoningEffort: "high" }, ...CODEX_ROWS] : CODEX_ROWS));
+    if (provider === "claude") return latestPerFamily(parseClaudeModels(CLAUDE_ROWS.map((row) =>
+      // An alias keeps its ID and gains a version: only the description moves.
+      released && row.value === "opus" ? { ...row, description: "Opus 6 \u00b7 Best for everyday, complex tasks" } : row) as never));
+    return latestPerFamily(parseGeminiModels(AGY_OUTPUT + (released ? "gemini-4-pro-high\tGemini 4 Pro (High)\ngemini-4-pro-low\tGemini 4 Pro (Low)\n" : "")));
+  };
+  const cache = createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover });
+  const shown = async () => {
+    const catalog = await cache.refresh();
+    return withSelectedModel(catalogModels(catalog), "opus", knownModels(catalog)).map((m) => `${m.value}=${m.label}`);
+  };
+  // Superseded releases, the hidden row, the "default" alias and agy's
+  // non-Gemini rows are all meant to be absent; nothing else is.
+  assert.deepEqual(await shown(), [
+    "opus=Opus 5", "claude-fable-5[1m]=Fable 5", "haiku=Haiku 4.5",
+    "gpt-6.1-terra=Terra 6.1", "gpt-6.1-sol=Sol 6.1",
+    "gemini-3.8-flash-high=Flash 3.8",
+  ]);
+  released = true;
+  assert.deepEqual(await shown(), [
+    "opus=Opus 6", "claude-fable-5[1m]=Fable 5", "haiku=Haiku 4.5",
+    "gpt-7-nova=Nova 7", "gpt-6.1-terra=Terra 6.1", "gpt-6.1-sol=Sol 6.1",
+    "gemini-3.8-flash-high=Flash 3.8", "gemini-4-pro-high=Pro 4",
+  ]);
+  assert.equal(reasoningEffortsForModel("gpt-7-nova", catalogModels(await cache.refresh())).join(), "high");
+});
+
+test("a provider that fails says which one and why, without leaking the raw error", async (t) => {
+  const dir = fixture(t);
+  const sol: ModelChoice = { value: "gpt-6.1-sol", label: "Sol 6.1", provider: "codex", reasoningEfforts: ["high"] };
+  let fail: Record<string, () => never> = {};
+  const cache = createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover: async (p) => {
+    fail[p]?.();
+    return p === "codex" ? [sol] : [];
+  } });
+  // Every provider fails a different way, and each reason names the cause.
+  fail = {
+    codex: () => { throw new DiscoveryError("timed out"); },
+    claude: () => { throw new Error("/Users/secret/.config/token-abc123 not readable"); },
+    gemini: () => { throw new DiscoveryError("is not installed"); },
+  };
+  const failed = await cache.refresh();
+  assert.equal(failed.providers.codex.error, "timed out");
+  assert.equal(failed.providers.gemini.error, "is not installed");
+  // A raw error may carry paths or credentials, so only our own wording shows.
+  assert.equal(failed.providers.claude.error, "could not be reached");
+  assert.equal(JSON.stringify(failed).includes("token-abc123"), false);
+  // An empty result is a failure too, and says so rather than looking unchanged.
+  fail = {};
+  const empty = await cache.refresh();
+  assert.equal(empty.providers.claude.error, "returned no usable models");
+  assert.equal(empty.providers.codex.error, undefined);
+  assert.equal(empty.providers.codex.source, "discovered");
+  assert.deepEqual(empty.providers.codex.models, [sol]);
 });

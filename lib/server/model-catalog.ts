@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { DiscoveryError, discoveryReason } from "./discovery-error";
 import { MODEL_CHOICES, REASONING_LABELS, type ModelChoice, type ModelProvider } from "../models";
 
 const PROVIDERS: ModelProvider[] = ["claude", "codex", "gemini"];
@@ -88,7 +89,7 @@ export function createModelCatalog(options: {
     inFlight = (async () => {
       const results = await Promise.allSettled(PROVIDERS.map(async (provider) => {
         const models = await options.discover(provider);
-        if (!validModels(models, provider) || !models.length) throw new Error("Empty or invalid catalog");
+        if (!validModels(models, provider) || !models.length) throw new DiscoveryError("returned no usable models");
         return [...new Map(models.map((m) => [m.value, m])).values()];
       }));
       const providers = { ...previous.providers };
@@ -96,8 +97,10 @@ export function createModelCatalog(options: {
         const provider = PROVIDERS[i];
         providers[provider] = result.status === "fulfilled"
           ? { models: result.value, source: "discovered", lastSuccessAt: now() }
+          // Why, not just that: an unchanged list is otherwise indistinguishable
+          // from a refresh that found nothing new.
           : { ...previous.providers[provider], source: previous.providers[provider].lastSuccessAt !== undefined ? "cached" : "bundled",
-            error: "Discovery unavailable; using the last successful catalog or bundled defaults." };
+            error: discoveryReason(result.reason) };
       });
       const value: ModelCatalog = { version: 1, providers, checkedAt: now(),
         retained: knownModels(previous).slice(-2000) };
