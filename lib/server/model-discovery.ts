@@ -98,7 +98,11 @@ export function parseClaudeModels(rows: ModelInfo[]): ModelChoice[] {
   return rows.flatMap((row) => {
     // "default" is an alias for another listed model, not a model of its own.
     if (!row.value?.trim() || row.value === "default") return [];
-    return [normalizeChoice({ value: row.value, label: claudeLabel(row), provider: "claude" as const,
+    // `opus` and `sonnet` are moving aliases: they name whatever is current, so
+    // a catalog built from them is byte-identical before and after a release.
+    // Store what the alias resolves to, which is the thing that actually changes.
+    return [normalizeChoice({ value: row.resolvedModel?.trim() || row.value, label: claudeLabel(row),
+      provider: "claude" as const,
       reasoningEfforts: row.supportsEffort === false ? [] : efforts(row.supportedEffortLevels) })];
   });
 }
@@ -133,7 +137,7 @@ export async function discoverClaude(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<
 export function parseGeminiModels(output: string): ModelChoice[] {
   const groups = new Map<string, ModelChoice>();
   for (const line of output.split(/\r?\n/)) {
-    const match = /^(gemini-[\w.-]+)\t+(.+)$/.exec(line.trim());
+    const match = /^(gemini-[^\t]+)\t+(.+)$/.exec(line.trim());
     if (!match) continue;
     const [, value, label] = match;
     const variant = /-(low|medium|high)$/.exec(value);
@@ -182,7 +186,10 @@ export function latestPerFamily(models: ModelChoice[]): ModelChoice[] {
   for (const model of models) {
     const parts = model.value.split("-");
     const at = parts.findIndex((part) => VERSION.test(part));
-    const family = at < 0 ? model.value : parts.filter((_, i) => i !== at).join("-");
+    // The version keeps its slot: `gpt-6-sol` and `gpt-6.1-sol` are the same
+    // family, but `gpt-sol` and `gpt-terra-2` are not — different shapes name
+    // different things, and guessing costs us a release we should have shown.
+    const family = at < 0 ? model.value : parts.map((part, i) => (i === at ? "*" : part)).join("-");
     const version = at < 0 ? [] : parts[at].split(".").map(Number);
     const best = versions.get(family);
     if (best && !newer(version, best)) continue;

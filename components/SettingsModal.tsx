@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "@/lib/store";
 import {
   DEFAULT_MODEL,
@@ -72,6 +72,9 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   }
 
   async function refreshModels() {
+    // A refresh supersedes the stored-catalog read: left running, a slow one
+    // lands last and quietly puts the pre-refresh list back.
+    storedRead.current?.abort();
     setRefreshing(true);
     try {
       const result = await fetchCatalog(true);
@@ -84,8 +87,12 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
     } finally { setRefreshing(false); }
   }
 
+  const storedRead = useRef<AbortController>(null);
+
   useEffect(() => {
     const controller = new AbortController();
+    const stored = new AbortController();
+    storedRead.current = stored;
     void fetch("/api/config", { signal: controller.signal, cache: "no-store" })
       .then((res) => {
         if (!res.ok) throw new Error("Could not load settings. Close and try again.");
@@ -99,14 +106,14 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
         setLoaded(true);
       })
       .catch((err: unknown) => { if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Could not load settings."); });
-    void fetchCatalog(false, controller.signal)
+    void fetchCatalog(false, stored.signal)
       .then((result) => {
-        if (controller.signal.aborted) return;
+        if (stored.signal.aborted) return;
         setCatalog(result.models);
         setCatalogMessage(catalogStatus(result));
       })
-      .catch(() => { if (!controller.signal.aborted) setCatalogMessage(["Could not load models. Using bundled defaults."]); });
-    return () => controller.abort();
+      .catch(() => { if (!stored.signal.aborted) setCatalogMessage(["Could not load models. Using bundled defaults."]); });
+    return () => { controller.abort(); stored.abort(); };
   }, []);
 
   useEffect(() => {

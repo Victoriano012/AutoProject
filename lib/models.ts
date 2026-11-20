@@ -43,7 +43,8 @@ export function normalizeModelLabel(label: string): string {
   const versions = words.filter((word) => VERSION_WORD.test(word));
   const family = words.filter((word) => !VERSION_WORD.test(word));
   // No version, several, or nothing left beside one: not a shape we know.
-  return versions.length === 1 && family.length > 0 ? `${family.join(" ")} ${versions[0]}` : name;
+  if (versions.length === 1 && family.length > 0) return `${family.join(" ")} ${versions[0]}`;
+  return name || label.trim();
 }
 
 export function normalizeChoice<T extends ModelChoice>(choice: T): T {

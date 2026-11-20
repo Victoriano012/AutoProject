@@ -37,17 +37,17 @@ test("discovery learns Sol-6.1 and capabilities without inferring from names", (
   assert.deepEqual(parseCodexModels([{ model: "hidden", hidden: true }, { id: "wrong" }]), []);
 });
 
-test("Claude models are listed once under the name the tool reports", () => {
+test("Claude models are listed under the ID their alias resolves to", () => {
   const models = parseClaudeModels([
     { value: "sonnet", resolvedModel: "claude-new-sonnet", displayName: "Sonnet", description: "", supportedEffortLevels: ["low", "high"] },
     { value: "unknown", displayName: "Unknown", description: "" },
     { value: "disabled", displayName: "Disabled", description: "", supportsEffort: false, supportedEffortLevels: ["high"] },
   ]);
-  // The resolved ID is the same model under a pinned name: listing it too would
-  // double the menu and leave the raw ID showing in the label.
-  assert.deepEqual(models.map((m) => [m.value, m.label]), [["sonnet", "Sonnet"], ["unknown", "Unknown"], ["disabled", "Disabled"]]);
-  assert.equal(providerForModel("sonnet", models), "claude");
-  assert.deepEqual(reasoningEffortsForModel("sonnet", models), ["low", "high"]);
+  // "sonnet" names whatever is current, so a catalog keyed on aliases is
+  // identical before and after a release. Key it on what the alias points at.
+  assert.deepEqual(models.map((m) => [m.value, m.label]), [["claude-new-sonnet", "Sonnet"], ["unknown", "Unknown"], ["disabled", "Disabled"]]);
+  assert.equal(providerForModel("claude-new-sonnet", models), "claude");
+  assert.deepEqual(reasoningEffortsForModel("claude-new-sonnet", models), ["low", "high"]);
   assert.deepEqual(reasoningEffortsForModel("unknown", models), []);
   assert.deepEqual(reasoningEffortsForModel("disabled", models), []);
 });
@@ -231,7 +231,7 @@ test("Claude's Default alias is not a model, and picking it still resolves", () 
     // The SDK carries the version in the description, not the display name.
     { value: "opus", resolvedModel: "claude-opus-5", displayName: "Opus", description: "Opus 5.5 \u00b7 Best for everyday, complex tasks", supportedEffortLevels: ["low", "high"] },
   ]);
-  assert.deepEqual(models.map((m) => [m.value, m.label]), [["opus", "Opus 5.5"]]);
+  assert.deepEqual(models.map((m) => [m.value, m.label]), [["claude-opus-5", "Opus 5.5"]]);
   // Someone already saved it: it must stay visible, selectable and Claude-routed.
   const listed = withSelectedModel(models, "default");
   assert.equal(listed.length, 2);
@@ -273,27 +273,32 @@ test("a newly released model reaches the list Settings renders, for every provid
     if (provider === "codex") return latestPerFamily(parseCodexModels(
       released ? [{ model: "gpt-7-nova", displayName: "GPT-7-Nova", hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "high" }], defaultReasoningEffort: "high" }, ...CODEX_ROWS] : CODEX_ROWS));
     if (provider === "claude") return latestPerFamily(parseClaudeModels(CLAUDE_ROWS.map((row) =>
-      // An alias keeps its ID and gains a version: only the description moves.
-      released && row.value === "opus" ? { ...row, description: "Opus 6 \u00b7 Best for everyday, complex tasks" } : row) as never));
+      // The alias "opus" is unchanged by the release; what it resolves to is not.
+      released && row.value === "opus"
+        ? { ...row, resolvedModel: "claude-opus-6", description: "Opus 6 \u00b7 Best for everyday, complex tasks" }
+        : row) as never));
     return latestPerFamily(parseGeminiModels(AGY_OUTPUT + (released ? "gemini-4-pro-high\tGemini 4 Pro (High)\ngemini-4-pro-low\tGemini 4 Pro (Low)\n" : "")));
   };
   const cache = createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover });
   const shown = async () => {
     const catalog = await cache.refresh();
-    return withSelectedModel(catalogModels(catalog), "opus", knownModels(catalog)).map((m) => `${m.value}=${m.label}`);
+    return withSelectedModel(catalogModels(catalog), "claude-opus-5", knownModels(catalog)).map((m) => `${m.value}=${m.label}`);
   };
   // Superseded releases, the hidden row, the "default" alias and agy's
   // non-Gemini rows are all meant to be absent; nothing else is.
   assert.deepEqual(await shown(), [
-    "opus=Opus 5", "claude-fable-5[1m]=Fable 5", "haiku=Haiku 4.5",
+    "claude-opus-5=Opus 5", "claude-fable-5[1m]=Fable 5", "claude-haiku-4-5-20251001=Haiku 4.5",
     "gpt-6.1-terra=Terra 6.1", "gpt-6.1-sol=Sol 6.1",
     "gemini-3.8-flash-high=Flash 3.8",
   ]);
   released = true;
+  // Every provider's new release is in the list, and the model that was saved
+  // before it landed is still there to switch back to.
   assert.deepEqual(await shown(), [
-    "opus=Opus 6", "claude-fable-5[1m]=Fable 5", "haiku=Haiku 4.5",
+    "claude-opus-6=Opus 6", "claude-fable-5[1m]=Fable 5", "claude-haiku-4-5-20251001=Haiku 4.5",
     "gpt-7-nova=Nova 7", "gpt-6.1-terra=Terra 6.1", "gpt-6.1-sol=Sol 6.1",
     "gemini-3.8-flash-high=Flash 3.8", "gemini-4-pro-high=Pro 4",
+    "claude-opus-5=Opus 5 (saved selection)",
   ]);
   assert.equal(reasoningEffortsForModel("gpt-7-nova", catalogModels(await cache.refresh())).join(), "high");
 });
@@ -325,4 +330,27 @@ test("a provider that fails says which one and why, without leaking the raw erro
   assert.equal(empty.providers.codex.error, undefined);
   assert.equal(empty.providers.codex.source, "discovered");
   assert.deepEqual(empty.providers.codex.models, [sol]);
+});
+
+test("a release the version rule cannot order is still offered, and one bad row stays one bad row", async (t) => {
+  // Neither a version-less ID nor a trailing-version one is a later release of
+  // gpt-6.1-sol, so neither may be dropped as superseded by it.
+  const codex = parseCodexModels([
+    { model: "gpt-6.1-sol", displayName: "GPT-6.1-Sol" }, { model: "gpt-sol", displayName: "GPT-Sol" },
+    { model: "gpt-sol-2", displayName: "GPT-Sol-2" }, { model: "gpt-6-sol", displayName: "GPT-6-Sol" },
+  ]);
+  assert.deepEqual(latestPerFamily(codex).map((m) => m.value), ["gpt-6.1-sol", "gpt-sol", "gpt-sol-2"]);
+  // agy IDs are not limited to word characters.
+  assert.deepEqual(parseGeminiModels("gemini-4-pro[1m]-high\tGemini 4 Pro 1M (High)\n").map((m) => m.value), ["gemini-4-pro[1m]-high"]);
+  // Nothing recognisable left: keep the name the tool gave rather than none.
+  assert.equal(normalizeModelLabel("(default)"), "(default)");
+  // An unusable row is dropped by itself; the release beside it still arrives.
+  const dir = fixture(t);
+  const cache = createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover: async (p) => p === "codex"
+    ? [{ value: "gpt-7-nova", label: "Nova 7", provider: "codex", reasoningEfforts: ["high"] },
+      { value: "gpt-7-junk", label: "x".repeat(2000), provider: "codex", reasoningEfforts: ["high"] }]
+    : [] });
+  const catalog = await cache.refresh();
+  assert.deepEqual(catalog.providers.codex.models.map((m) => m.value), ["gpt-7-nova"]);
+  assert.equal(catalog.providers.codex.error, undefined);
 });

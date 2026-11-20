@@ -88,8 +88,10 @@ export function createModelCatalog(options: {
     const previous = read();
     inFlight = (async () => {
       const results = await Promise.allSettled(PROVIDERS.map(async (provider) => {
-        const models = await options.discover(provider);
-        if (!validModels(models, provider) || !models.length) throw new DiscoveryError("returned no usable models");
+        // Per model, not per provider: one oddly shaped new release must not
+        // take the whole list down with it.
+        const models = (await options.discover(provider)).filter((m) => validModels([m], provider));
+        if (!models.length) throw new DiscoveryError("returned no usable models");
         return [...new Map(models.map((m) => [m.value, m])).values()];
       }));
       const providers = { ...previous.providers };
