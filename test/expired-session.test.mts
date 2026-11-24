@@ -12,6 +12,7 @@ after(() => fs.rmSync(home, { recursive: true, force: true }));
 
 const { writeConfig } = await import("../lib/config.ts");
 const { providers } = await import("../lib/server/agent.ts");
+const { codexUpdating, streamCodexAgent, updateWhenIdle } = await import("../lib/server/codex.ts");
 const runs = await import("../lib/server/runs.ts");
 const store = await import("../lib/server/project-store.ts");
 const { writeProject } = await import("../lib/projects-fs.ts");
@@ -147,4 +148,31 @@ process.exitCode = 1;`);
   assert.equal(worker.sessionId, "codex:thread-old");
   assert.equal(ticket.sessionId, "codex:thread-old");
   assert.deepEqual(ticket.log.filter((e) => e.kind === "error").map((e) => e.text), [limit]);
+});
+
+test("Stop ends a Codex run waiting on a Codex update at once, and the install carries on", { timeout: 5000 }, async (t) => {
+  const dir = project(t, "gpt-6-astra", "codex:thread-old");
+  const calls = fakeCli(t, "AUTOPROJECT_CODEX_PATH", `emit({ type: "thread.started", thread_id: "thread-new" });`);
+  let finish!: () => void;
+  const installing = updateWhenIdle(() => new Promise<void>((done) => { finish = done; }))!;
+  let reached!: () => void;
+  const waiting = new Promise<void>((resolve) => { reached = resolve; });
+  t.mock.method(providers.codex, "stream", async function* (req: AgentRequest): AsyncGenerator<AgentEvent> {
+    reached();
+    yield* streamCodexAgent(req);
+  });
+
+  const run = runs.runTicket(dir, "t");
+  await waiting;
+  runs.stopTicket(dir, "t");
+  await run;
+  const [ticket] = store.getProject(dir)!.tickets;
+  assert.equal(ticket.status, "todo");
+  assert.equal(ticket.paused, true);
+  assert.deepEqual(ticket.log.filter((e) => e.kind === "error"), []);
+  assert.throws(calls, { code: "ENOENT" }, "Codex never started");
+  assert.equal(codexUpdating(), true, "the install carries on");
+  finish();
+  await installing;
+  assert.equal(codexUpdating(), false);
 });

@@ -82,29 +82,37 @@ const codexUse = ((globalThis as { autoProjectCodex?: { holders: number; update?
 
 export const codexUpdating = () => Boolean(codexUse.update);
 
-export async function holdCodex(): Promise<() => void> {
-  while (codexUse.update) await codexUse.update;
+/** Rejects once `signal` aborts: a run stopped while it waits ends at once,
+ * and the install it waited on carries on. */
+export async function holdCodex(signal?: AbortSignal): Promise<() => void> {
+  while (codexUse.update) {
+    signal?.throwIfAborted();
+    await Promise.race([codexUse.update, new Promise((r) => signal?.addEventListener("abort", r, { once: true }))]);
+  }
+  signal?.throwIfAborted();
   codexUse.holders++;
   return () => { codexUse.holders--; };
 }
 
-/** Start `update` unless Codex is in use or already updating. */
-export function updateWhenIdle<T>(update: () => Promise<T>): Promise<T | undefined> {
-  if (codexUse.holders || codexUse.update) return Promise.resolve(undefined);
+/** Start `update` unless Codex is in use or already updating. What it returns
+ * settles only once the lock is free again. */
+export function updateWhenIdle<T>(update: () => Promise<T>): Promise<T> | undefined {
+  if (codexUse.holders || codexUse.update) return;
   const running = update();
   const done = () => { codexUse.update = undefined; };
-  codexUse.update = Promise.race([running, new Promise((r) => setTimeout(r, 600_000).unref())]).then(done, done);
-  return running;
+  const lock = Promise.race([running, new Promise((r) => setTimeout(r, 600_000).unref())]).then(done, done);
+  codexUse.update = lock;
+  return lock.then(() => running);
 }
 
 /** Codex's documented JSONL mode supplies session, progress, tool, and final
  * message events while auth stays entirely inside the local Codex CLI. */
 export async function* streamCodexAgent(req: AgentRequest): AsyncGenerator<AgentEvent> {
-  const release = await holdCodex();
+  const release = await holdCodex(req.signal).catch(() => undefined);
   try {
-    if (req.signal.aborted) { yield { type: "error", message: "Agent stopped" }; return; }
+    if (!release) { yield { type: "error", message: "Agent stopped" }; return; }
     yield* runCodex(req);
-  } finally { release(); }
+  } finally { release?.(); }
 }
 
 async function* runCodex(req: AgentRequest): AsyncGenerator<AgentEvent> {

@@ -88,9 +88,10 @@ export function createModelCatalog(options: {
     } catch { /* Keep the successful in-memory catalog if disk is unavailable. */ }
     finally { try { fs.rmSync(temporary, { force: true }); } catch { /* read-only disk */ } }
   }
-  /** Always discovers. Concurrent callers share the one in-flight attempt. */
-  function refresh(): Promise<ModelCatalog> {
-    if (inFlight) return inFlight;
+  /** Always discovers. Concurrent callers share the one in-flight attempt;
+   * `after` waits for it and starts another, which asks every tool anew. */
+  function refresh(after = false): Promise<ModelCatalog> {
+    if (inFlight) return after ? inFlight.then(() => refresh()) : inFlight;
     const previous = read();
     inFlight = (async () => {
       const results = await Promise.allSettled(PROVIDERS.map(async (provider) => {

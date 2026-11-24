@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { createModelCatalog, catalogModels, knownModels } from "../lib/server/model-catalog.ts";
 import { DiscoveryError } from "../lib/server/discovery-error.ts";
-import { DISCOVERY_TIMEOUT_MS, parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, updateCodex, type Discovery } from "../lib/server/model-discovery.ts";
+import { DISCOVERY_TIMEOUT_MS, parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, codexOutdated, installCodex, type Discovery } from "../lib/server/model-discovery.ts";
 import { holdCodex } from "../lib/server/codex.ts";
 import { latestPerFamily, modelChoice, MODEL_CHOICES, offeredModels, normalizeModelLabel, providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
 
@@ -460,10 +460,10 @@ test("every press of Refresh asks every tool again, even after one failed", asyn
   }
 });
 
-/** A Codex whose `update` takes `delay` ms to install 0.172.0, saying "installing"
- * meanwhile. Before that its app-server dies on start, and "broken" makes
+/** A Codex whose `update` takes `delay` ms to install `target`, saying
+ * "installing" meanwhile. Only 0.172.0 answers app-server, and "broken" makes
  * `--version` fail too. */
-function fakeCodex(t: test.TestContext, version: string, delay = 0) {
+function fakeCodex(t: test.TestContext, version: string, delay = 0, target = "0.172.0") {
   const dir = fixture(t);
   const executable = path.join(dir, "codex");
   const state = path.join(dir, "version");
@@ -471,7 +471,7 @@ function fakeCodex(t: test.TestContext, version: string, delay = 0) {
   fs.writeFileSync(executable, `#!/usr/bin/env node
 const fs = require('node:fs');
 const version = fs.readFileSync(${JSON.stringify(state)}, 'utf8');
-if (process.argv[2] === 'update') { fs.writeFileSync(${JSON.stringify(state)}, 'installing'); setTimeout(() => fs.writeFileSync(${JSON.stringify(state)}, '0.172.0'), ${delay}); }
+if (process.argv[2] === 'update') { fs.writeFileSync(${JSON.stringify(state)}, 'installing'); setTimeout(() => fs.writeFileSync(${JSON.stringify(state)}, ${JSON.stringify(target)}), ${delay}); }
 else if (process.argv[2] === '--version') { if (version === 'broken') process.exit(1); console.log('codex-cli ' + version); }
 else if (version !== '0.172.0') process.exit(1);
 else require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
@@ -489,25 +489,24 @@ test("an outdated Codex is updated even when it cannot list its models or say it
   for (const start of ["0.160.0", "broken"]) {
     const installed = fakeCodex(t, start);
     await assert.rejects(discoverCodex(5000), /stopped before answering/);
-    assert.equal(await updateCodex(latest), "0.172.0");
+    assert.equal(await codexOutdated(latest), true);
+    assert.equal(await installCodex(), "0.172.0");
     assert.deepEqual((await discoverCodex(5000)).models.map((m) => m.value), ["gpt-6.2-sol"]);
     assert.equal(installed(), "0.172.0");
   }
-  // Already current, or npm unreachable: nothing is installed.
-  assert.equal(await updateCodex(latest), undefined);
-  const installed = fakeCodex(t, "0.160.0");
-  assert.equal(await updateCodex(async () => { throw new Error("offline"); }), undefined);
-  assert.equal(installed(), "0.160.0");
+  // Already current, or npm unreachable: nothing to install.
+  assert.equal(await codexOutdated(latest), false);
+  fakeCodex(t, "0.160.0");
+  assert.equal(await codexOutdated(async () => { throw new Error("offline"); }), false);
 });
 
 test("Codex is never updated under a run, and a run never starts on a half-installed one", async (t) => {
   const installed = fakeCodex(t, "0.160.0", 300);
-  const latest = async () => "0.172.0";
   const release = await holdCodex();
-  assert.equal(await updateCodex(latest), undefined, "a run is going: no update");
+  assert.equal(installCodex(), undefined, "a run is going: no update");
   assert.equal(installed(), "0.160.0");
   release();
-  const updating = updateCodex(latest);
+  const updating = installCodex();
   while (installed() !== "installing") await new Promise((r) => setTimeout(r, 20));
   // A refresh mid-install answers at once rather than waiting for it.
   const { discoverers } = await import("../lib/server/model-discovery.ts");
@@ -535,12 +534,42 @@ test("a refresh answers without waiting on a Codex update, whose models then lan
   assert.ok(Date.now() - started < 1500, "Claude and Gemini did not wait for the install");
   assert.equal(first.providers.codex.error, "stopped before answering");
   assert.equal(first.models.find((m: ModelChoice) => m.provider === "claude")?.value, "claude-model");
-  let codex: ModelChoice[] = [];
-  for (let i = 0; i < 100 && !codex.length; i++) {
+  assert.equal(first.codexUpdate, "updating", "the press that started the install says so");
+  const settled = await untilSettled(GET);
+  assert.equal(settled.codexUpdate, undefined);
+  assert.equal(settled.providers.codex.error, undefined);
+  assert.deepEqual(settled.models.filter((m: ModelChoice) => m.provider === "codex").map((m: ModelChoice) => m.value),
+    ["gpt-6.2-sol"], "the updated Codex's models arrive without another press");
+});
+
+/** Settings' wait: read the stored catalog until Codex is no longer updating. */
+async function untilSettled(GET: () => Response) {
+  for (let i = 0; i < 100; i++) {
+    const body = await GET().json();
+    if (body.codexUpdate !== "updating") return body;
     await new Promise((r) => setTimeout(r, 100));
-    codex = (await (await GET()).json()).models.filter((m: ModelChoice) => m.provider === "codex" && m.value === "gpt-6.2-sol");
   }
-  assert.equal(codex.length, 1, "the updated Codex's models arrive without another press");
+  assert.fail("Codex never finished updating");
+}
+
+test("a Codex update that installs nothing keeps the models Codex already had, and says so", async (t) => {
+  // Past the once-a-minute npm check the test above made.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() + 120_000 });
+  const home = fixture(t);
+  t.mock.method(os, "homedir", () => home);
+  t.mock.method(globalThis, "fetch", async () => Response.json({ version: "0.180.0" }));
+  fakeCodex(t, "0.172.0", 300, "0.172.0");
+  const { discoverers } = await import("../lib/server/model-discovery.ts");
+  for (const provider of ["claude", "gemini"] as const) {
+    t.mock.method(discoverers, provider, async () => ({ models: [{ value: `${provider}-model`, label: "Model", provider, reasoningEfforts: [] }] }));
+  }
+  const { POST, GET } = await import("../app/api/models/route.ts");
+  const first = await (await POST()).json();
+  assert.equal(first.codexUpdate, "updating");
+  const settled = await untilSettled(GET);
+  assert.equal(settled.codexUpdate, "failed");
+  assert.equal(settled.providers.codex.error, undefined);
+  assert.deepEqual(settled.models.filter((m: ModelChoice) => m.provider === "codex").map((m: ModelChoice) => m.value), ["gpt-6.2-sol"]);
 });
 
 test("Claude runs the person's own, self-updating CLI when there is one", async (t) => {

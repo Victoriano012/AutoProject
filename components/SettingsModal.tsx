@@ -22,6 +22,7 @@ import StatsModal from "./StatsModal";
 type CatalogResponse = {
   models: ModelChoice[];
   providers: Record<ModelProvider, { source: string; error?: string; lastSuccessAt?: number; version?: string }>;
+  codexUpdate?: "updating" | "failed";
 };
 
 async function fetchCatalog(force: boolean, signal?: AbortSignal): Promise<CatalogResponse> {
@@ -67,6 +68,8 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [refreshing, setRefreshing] = useState(false);
   const [catalogMessage, setCatalogMessage] = useState<string[]>([]);
   const [tools, setTools] = useState("");
+  const [codexUpdate, setCodexUpdate] = useState<CatalogResponse["codexUpdate"]>();
+  const [reads, setReads] = useState(0);
   const choices = withSelectedModel(catalog, model);
   const reasoningLevels = reasoningEffortsForModel(model, choices);
   const effectiveEffort = resolveReasoningEffort(model, reasoningEffort, choices);
@@ -78,7 +81,8 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
    * leaves behind looks exactly like a refresh that found nothing new. */
   function catalogStatus(result: CatalogResponse): string[] {
     return PROVIDERS.flatMap((p) => {
-      const error = result.providers[p.value]?.error;
+      // While it updates, the note under the list says so instead.
+      const error = p.value === "codex" && result.codexUpdate === "updating" ? undefined : result.providers[p.value]?.error;
       return error ? [`${p.label} ${error}.`] : [];
     });
   }
@@ -95,6 +99,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
       setCatalog(result.models);
       setCatalogMessage(catalogStatus(result));
       setTools(catalogTools(result));
+      setCodexUpdate(result.codexUpdate);
     } catch (err) {
       setCatalogMessage([err instanceof Error ? err.message : "Could not refresh models."]);
     } finally { setRefreshing(false); }
@@ -104,8 +109,6 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    const stored = new AbortController();
-    storedRead.current = stored;
     void fetch("/api/config", { signal: controller.signal, cache: "no-store" })
       .then((res) => {
         if (!res.ok) throw new Error("Could not load settings. Close and try again.");
@@ -119,16 +122,32 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
         setLoaded(true);
       })
       .catch((err: unknown) => { if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Could not load settings."); });
+    return () => controller.abort();
+  }, []);
+
+  // The stored catalog: read on open, and again with each tick below.
+  useEffect(() => {
+    const stored = new AbortController();
+    storedRead.current = stored;
     void fetchCatalog(false, stored.signal)
       .then((result) => {
         if (stored.signal.aborted) return;
         setCatalog(result.models);
         setCatalogMessage(catalogStatus(result));
         setTools(catalogTools(result));
+        setCodexUpdate(result.codexUpdate);
       })
       .catch(() => { if (!stored.signal.aborted) setCatalogMessage(["Could not load models. Using bundled defaults."]); });
-    return () => { controller.abort(); stored.abort(); };
-  }, []);
+    return () => stored.abort();
+  }, [reads]);
+
+  // A Codex install outlasts the refresh that started it: the server stores
+  // its models when it ends, and Settings reads them then, without a press.
+  useEffect(() => {
+    if (codexUpdate !== "updating" || refreshing) return;
+    const timer = setInterval(() => setReads((n) => n + 1), 3000);
+    return () => clearInterval(timer);
+  }, [codexUpdate, refreshing]);
 
   useEffect(() => {
     // Escape belongs to whichever view is on top: the stats view closes back to
@@ -212,6 +231,11 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 {refreshing ? <Spinner className="h-5 w-5" color="border-zinc-400" /> : <RefreshIcon />}
               </button>
             </div>
+            {codexUpdate && (
+              <p role="status" className={`mt-2 text-xs ${codexUpdate === "failed" ? "text-red-600" : "text-zinc-500"}`}>
+                {codexUpdate === "failed" ? "Codex could not update; keeping its current models." : "Codex is updating; its new models will appear here."}
+              </p>
+            )}
             {catalogMessage.length > 0 && (
               <p role="status" className="mt-2 text-xs text-red-600">{catalogMessage.join(" ")}</p>
             )}

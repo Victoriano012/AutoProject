@@ -203,41 +203,55 @@ const codexVersion = () => run(codexPath(), ["--version"], DISCOVERY_TIMEOUT_MS)
 /** Codex offers a model only to a CLI new enough for it, and an npm install
  * never updates itself (its own check runs in the TUI alone). So `codex update`
  * runs when npm has a newer release, or when the CLI cannot even say its
- * version, whether or not it answered for its models. The install runs in its
- * own process group with no timeout: a killed one would leave Codex broken.
- * Resolves to the version now installed when that changed. */
-export async function updateCodex(latest = latestCodex): Promise<string | undefined> {
+ * version, whether or not it answered for its models. */
+export async function codexOutdated(latest = latestCodex): Promise<boolean> {
   const [installed, release] = await Promise.all([codexVersion(), latest().catch(() => undefined)]);
-  if (!release || (installed && !newer(release, installed))) return;
+  return Boolean(release && (!installed || newer(release, installed)));
+}
+
+/** `codex update`, unless Codex is in use. The install runs in its own process
+ * group with no timeout: a killed one would leave Codex broken. Resolves to the
+ * version now installed when that changed. */
+export function installCodex(): Promise<string | undefined> | undefined {
   return updateWhenIdle(async () => {
+    const before = await codexVersion();
     await new Promise((done) => spawn(/* turbopackIgnore: true */ codexPath(), ["update"], {
       cwd: os.homedir(), env: process.env, stdio: "ignore", detached: true,
     }).on("close", done).on("error", done));
     const now = await codexVersion();
-    return now !== installed ? now : undefined;
+    return now !== before ? now : undefined;
   });
 }
 
 let lastCodexCheck = 0;
+/** "updating" from the start of an install until the catalog holds what it
+ * installed; "failed" when it installed nothing, until the next refresh. */
+let codexUpdate: "updating" | "failed" | undefined;
+export const codexUpdateState = () => codexUpdate;
 
 async function discoverCurrentCodex(): Promise<Discovery> {
-  // Waiting on the install would hold up Claude and Gemini too: say so instead.
-  if (codexUpdating()) throw new DiscoveryError("is updating; refresh again in a minute");
+  // Waiting on the install would hold up Claude and Gemini too: Settings says
+  // Codex is updating and picks up its models once they land.
+  if (codexUpdating()) throw new DiscoveryError("is updating");
+  if (codexUpdate === "failed") codexUpdate = undefined;
+  // npm is asked at most once a minute, beside discovery rather than after it.
+  const outdated = Date.now() - lastCodexCheck > 60_000 && (lastCodexCheck = Date.now(), codexOutdated());
   const release = await holdCodex();
   try { return await discoverCodex(); }
   finally {
     release();
-    // Not awaited: Claude and Gemini answer without waiting on an install, and
-    // the new Codex's models are stored once it lands. npm is asked at most once
-    // a minute, which also keeps that follow-up refresh from asking again.
-    if (Date.now() - lastCodexCheck > 60_000) {
-      lastCodexCheck = Date.now();
-      void updateCodex().then(async (version) => {
-        if (!version) return;
-        // A refresh still in flight read Codex before the install: run another.
-        const { modelCatalog } = await import("./model-catalog");
-        if ((await modelCatalog.refresh()).providers.codex.version !== version) await modelCatalog.refresh();
-      }).catch(() => {});
+    // Started before this refresh answers, so its answer already says so.
+    const installing = await outdated ? installCodex() : undefined;
+    if (installing) {
+      codexUpdate = "updating";
+      void (async () => {
+        const version = await installing;
+        lastCodexCheck = Date.now(); // npm has just been answered: not again for this refresh.
+        // After any refresh still in flight, which asked the old Codex. A failed
+        // install is asked again too, which keeps its models.
+        await (await import("./model-catalog")).modelCatalog.refresh(true);
+        codexUpdate = version ? undefined : "failed";
+      })().catch(() => { codexUpdate = "failed"; });
     }
   }
 }
