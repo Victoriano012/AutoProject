@@ -330,6 +330,11 @@ export async function flush(dir: string): Promise<void> {
   try { await writing; } finally { if (e.writing === writing) e.writing = null; }
 }
 
+/** Persist every open project, before the process is replaced. */
+export async function flushAll(): Promise<void> {
+  await Promise.all([...entries.keys()].map(flush));
+}
+
 /** Drop only after durable writes finish, so deletion cannot race a timer that
  * recreates its workspace. Run owners must first stop and await their tasks. */
 export async function forget(dir: string): Promise<void> {

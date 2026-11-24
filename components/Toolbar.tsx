@@ -13,6 +13,7 @@ import { retrySave } from "@/lib/sync";
 import GearIcon from "./GearIcon";
 import { BoardIcon, ChatIcon, PlayIcon, Spinner, StopIcon } from "./icons";
 import Logo from "./Logo";
+import RestartControl from "./RestartControl";
 import SettingsModal from "./SettingsModal";
 
 export default function Toolbar() {
@@ -93,6 +94,7 @@ export default function Toolbar() {
         >
           {mode === "act" ? <BoardIcon /> : <ChatIcon />}
         </button>
+        <RestartControl />
         <button
           className="rounded-lg px-2 py-1.5 text-zinc-600 hover:bg-zinc-200 hover:text-zinc-900"
           onClick={() => setShowSettings(true)}

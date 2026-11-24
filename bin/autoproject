@@ -4,12 +4,16 @@ set -euo pipefail
 
 usage() {
   cat <<'HELP'
-Usage: autoproject [--dev] [--port PORT] [--no-open]
+Usage: autoproject [--dev] [--port PORT] [--no-open] [--restart]
 
 Starts a production build on 127.0.0.1:4123, or reuses a server already there.
   --dev       Start Next.js development mode instead of building for production.
   --port      Override AUTOPROJECT_PORT (default 4123).
   --no-open   Print the URL without opening a browser.
+  --restart   Have the running server rebuild from this checkout and restart
+              once no agent is working. Returns when the build is done.
+  --replace PID  Used by that restart: stop PID, then serve the build already
+              in AUTOPROJECT_DIST_DIR.
 
 AUTOPROJECT_START_TIMEOUT sets the readiness timeout in seconds (default 60).
 AUTOPROJECT_STATE_DIR sets the log directory (default ~/.autoproject).
@@ -19,12 +23,16 @@ fail() { printf 'AutoProject: %s\n' "$*" >&2; exit 1; }
 
 launch_mode=start
 launch_open=true
+launch_restart=false
+launch_replace=
 launch_port="${AUTOPROJECT_PORT:-4123}"
 launch_timeout="${AUTOPROJECT_START_TIMEOUT:-60}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dev) launch_mode=dev ;;
     --no-open) launch_open=false ;;
+    --restart) launch_restart=true ;;
+    --replace) [ "$#" -ge 2 ] || fail '--replace requires a PID'; launch_replace="$2"; shift ;;
     --port) [ "$#" -ge 2 ] || fail '--port requires a number'; launch_port="$2"; shift ;;
     --help|-h) usage; exit 0 ;;
     *) fail "Unknown option: $1 (use --help)" ;;
@@ -50,14 +58,35 @@ launch_url="http://127.0.0.1:$launch_port"
 command -v curl >/dev/null || fail 'curl is required.'
 ready() { curl --fail --silent --max-time 2 "$launch_url/api/projects" >/dev/null 2>&1; }
 
+if [ "$launch_restart" = true ]; then
+  ready || fail "No AutoProject server at $launch_url."
+  launch_status="$(curl --fail --silent -X POST "$launch_url/api/restart")" || fail 'The server refused the restart.'
+  while [[ "$launch_status" == *'"phase":"building"'* ]]; do
+    sleep 1
+    # Unreachable after building means it is already restarting.
+    launch_status="$(curl --fail --silent "$launch_url/api/restart")" || launch_status=
+  done
+  [[ "$launch_status" != *'"phase":"failed"'* ]] || fail "The update failed to build; the running server keeps serving. Output: $launch_log"
+  printf 'Update built. AutoProject restarts once no agent is working.\n'
+  exit 0
+fi
+
+if [ -n "$launch_replace" ]; then
+  kill "$launch_replace" 2>/dev/null || true
+  while kill -0 "$launch_replace" 2>/dev/null; do sleep 0.2; done
+fi
+
 if ! ready; then
   command -v npm >/dev/null || fail 'npm is required. Install Node.js first.'
   [ -f "$launch_app_dir/package.json" ] || fail "No package.json beside the launcher: $launch_app_dir"
   [ -d "$launch_app_dir/node_modules/next" ] || fail "Dependencies are missing. Run npm install in $launch_app_dir."
   mkdir -p "$launch_state_dir"
-  if [ "$launch_mode" = start ]; then
+  # The live app is served from one of two build folders, so a plain `npm run
+  # build` never touches it and an update builds beside the one being served.
+  [ "$launch_mode" = dev ] || export AUTOPROJECT_DIST_DIR="${AUTOPROJECT_DIST_DIR:-.next-live/a}"
+  if [ "$launch_mode" = start ] && [ -z "$launch_replace" ]; then
     printf 'Building AutoProject for production…\n'
-    if ! (cd "$launch_app_dir" && npm run build >>"$launch_log" 2>&1); then
+    if ! (cd "$launch_app_dir" && NODE_ENV=production npm run build >>"$launch_log" 2>&1); then
       tail -n 20 "$launch_log" >&2
       fail "Build failed. Full output: $launch_log"
     fi

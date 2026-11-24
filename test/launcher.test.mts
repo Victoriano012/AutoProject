@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { spawnSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,8 +15,8 @@ function fixture(work: (paths: { root: string; launcher: string; env: NodeJS.Pro
   const launcher = join(root, "app/bin/autoproject");
   copyFileSync(new URL("../bin/autoproject", import.meta.url), launcher);
   const command = (name: string, body: string) => writeFileSync(join(fakeBin, name), `#!/bin/bash\nset -eu\n${body}\n`, { mode: 0o755 });
-  command("curl", '[ -f "$AUTOPROJECT_LAUNCH_TEST_DIR/ready" ]');
-  command("npm", `printf '%s\\n' "$*" >> "$AUTOPROJECT_LAUNCH_TEST_DIR/trace"
+  command("curl", 'case "$*" in *api/restart*) cat "$AUTOPROJECT_LAUNCH_TEST_DIR/restart" ;; *) [ -f "$AUTOPROJECT_LAUNCH_TEST_DIR/ready" ] ;; esac');
+  command("npm", `printf '%s %s\\n' "\u0024{AUTOPROJECT_DIST_DIR:--}" "$*" >> "$AUTOPROJECT_LAUNCH_TEST_DIR/trace"
 if [ "$2" = build ] && [ "\u0024{AUTOPROJECT_LAUNCH_TEST_FAIL:-}" = build ]; then echo 'Simulated build error' >&2; exit 1; fi
 if [ "$2" = start ] || [ "$2" = dev ]; then touch "$AUTOPROJECT_LAUNCH_TEST_DIR/ready"; fi`);
   const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, AUTOPROJECT_STATE_DIR: join(root, "state"), AUTOPROJECT_LAUNCH_TEST_DIR: root };
@@ -31,7 +31,7 @@ test("launcher builds production, binds loopback, and resolves a symlinked check
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /http:\/\/127\.0\.0\.1:4567/);
     assert.deepEqual(readFileSync(trace, "utf8").trim().split("\n"), [
-      "run build", "run start -- --hostname 127.0.0.1 --port 4567",
+      ".next-live/a run build", ".next-live/a run start -- --hostname 127.0.0.1 --port 4567",
     ]);
   });
 });
@@ -40,7 +40,7 @@ test("launcher development mode skips the production build", () => {
   fixture(({ launcher, env, trace }) => {
     const result = spawnSync("bash", [launcher, "--dev", "--no-open"], { env, encoding: "utf8", timeout: 10000 });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(readFileSync(trace, "utf8").trim(), "run dev -- --hostname 127.0.0.1 --port 4123");
+    assert.equal(readFileSync(trace, "utf8").trim(), "- run dev -- --hostname 127.0.0.1 --port 4123");
   });
 });
 
@@ -55,7 +55,7 @@ test("launcher reuses a ready server and surfaces build failures", () => {
     assert.equal(failed.status, 1);
     assert.match(failed.stderr, /Simulated build error/);
     assert.match(failed.stderr, /Build failed.*server\.log/);
-    assert.equal(readFileSync(trace, "utf8").trim(), "run build");
+    assert.equal(readFileSync(trace, "utf8").trim(), ".next-live/a run build");
   });
 });
 
@@ -64,6 +64,37 @@ test("launcher rejects invalid ports before invoking external services", () => {
     const result = spawnSync("bash", [launcher, "--port", "70000", "--no-open"], { env, encoding: "utf8", timeout: 10000 });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /1 to 65535/);
+    assert.equal(existsSync(trace), false);
+  });
+});
+
+test("launcher --replace stops the old server and serves the update's build without rebuilding", () => {
+  fixture(({ launcher, env, trace }) => {
+    // Orphaned, as a real server is once its launcher returns, so it is reaped when killed.
+    const old = Number(execSync("sleep 30 >/dev/null 2>&1 & echo $!", { encoding: "utf8" }));
+    const result = spawnSync("bash", [launcher, "--replace", String(old), "--no-open"], {
+      env: { ...env, AUTOPROJECT_DIST_DIR: ".next-live/b" }, encoding: "utf8", timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.throws(() => process.kill(old, 0));
+    assert.equal(readFileSync(trace, "utf8").trim(), ".next-live/b run start -- --hostname 127.0.0.1 --port 4123");
+  });
+});
+
+test("launcher --restart asks the running server and reports whether the update built", () => {
+  fixture(({ root, launcher, env, ready, trace }) => {
+    const restart = (status: string) => {
+      writeFileSync(join(root, "restart"), status);
+      return spawnSync("bash", [launcher, "--restart"], { env, encoding: "utf8", timeout: 10000 });
+    };
+    assert.match(restart('{"phase":"waiting","agents":0}').stderr, /No AutoProject server/);
+    writeFileSync(ready, "ready");
+    const failed = restart('{"phase":"failed","agents":0,"error":"Type error"}');
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /failed to build; the running server keeps serving/);
+    const built = restart('{"phase":"waiting","agents":2}');
+    assert.equal(built.status, 0, built.stderr);
+    assert.match(built.stdout, /restarts once no agent is working/);
     assert.equal(existsSync(trace), false);
   });
 });

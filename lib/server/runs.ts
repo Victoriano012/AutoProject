@@ -16,6 +16,7 @@ export { registry } from "./run-registry";
 import { createBoardIndex } from "../board-index";
 import { inheritedAttachments, startingSession, workerOf, ticketPrompt } from "./ticket-prompt";
 import { runWithNotes } from "./ticket-session";
+import { holdingForRestart } from "./restart";
 export { ticketPrompt } from "./ticket-prompt";
 
 export interface RunState {
@@ -212,6 +213,8 @@ export function claimedTickets(dir: string): Ticket[] {
 }
 
 function holdReason(dir: string, ticketId: string): string | null {
+  // Feedback held here is persisted, so the next server delivers it.
+  if (holdingForRestart()) return "Waiting for AutoProject to restart.";
   if (ownsTicket(dir, ticketId)) return "Waiting for the previous run to finish stopping.";
   const index = createBoardIndex(claimedTickets(dir));
   const claim = index.fileHolders(ticketId)[0];
@@ -412,7 +415,7 @@ export async function runTicket(dir: string, ticketId: string): Promise<void> {
 /** Index one scheduler snapshot, including claims for cards removed or edited
  * while their processes are still winding down. */
 function readyTickets(dir: string): Ticket[] {
-  if (registry.removing.has(dir)) return [];
+  if (registry.removing.has(dir) || holdingForRestart()) return [];
   const tickets = store.getProject(dir)?.tickets ?? [];
   const index = createBoardIndex(claimedTickets(dir));
   return tickets.filter((t) => t.status === "todo" && !t.paused &&

@@ -11,6 +11,7 @@ import {
 } from "../types";
 import { streamAgent } from "./agent";
 import { runLimiter } from "./run-limiter";
+import { holdingForRestart } from "./restart";
 import { addTicketsToBoard, boardServer, parsePlannedTickets, REQUEST_SCHEMA } from "./board-tools";
 import * as store from "./project-store";
 import { ensureLoaded, notifyAgent, registry } from "./runs";
@@ -150,6 +151,8 @@ export function sendToAgent(dir: string, mode: Mode, message: string): AgentRequ
 function pump(dir: string): Promise<void> {
   const existing = registry.agentTasks.get(dir);
   if (existing) return existing;
+  // Held for a restart: requests stay queued, on disk, for the next server.
+  if (holdingForRestart()) return Promise.resolve();
   const task = pumpOnce(dir);
   registry.agentTasks.set(dir, task);
   void task.finally(() => {

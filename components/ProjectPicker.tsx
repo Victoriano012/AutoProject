@@ -33,6 +33,7 @@ import GearIcon from "./GearIcon";
 import { StopSquare } from "./icons";
 import Logo from "./Logo";
 import SettingsModal from "./SettingsModal";
+import RestartControl from "./RestartControl";
 import TrashIcon from "./TrashIcon";
 import { useFitAllMinZoom } from "./useFitAllZoom";
 
@@ -451,6 +452,7 @@ export default function ProjectPicker() {
         >
           + Project
         </button>
+        <RestartControl />
         <button
           className="rounded-lg px-2 py-1.5 text-zinc-600 hover:bg-zinc-200 hover:text-zinc-900"
           onClick={() => setShowSettings(true)}

@@ -20,6 +20,10 @@ npm install
 
 The launcher builds and starts the production app at `http://127.0.0.1:4123`, reusing an existing server on that port. It resolves its checkout from its own location, including symlinks, and opens the browser on macOS or Linux. Use `./bin/autoproject --dev` for development with hot reload, `--port 5000` for another port, or `--no-open` to print the URL. A new production server always builds current source first. Logs go to `~/.autoproject/server.log`; `AUTOPROJECT_STATE_DIR` changes that directory and `AUTOPROJECT_START_TIMEOUT` changes the 60-second readiness timeout.
 
+The launcher builds and serves from `.next-live/a` or `.next-live/b` (`AUTOPROJECT_DIST_DIR`), so a plain `npm run build` — an agent checking its work — writes `.next` and never touches the running app.
+
+**Update & restart** (the header button, or `./bin/autoproject --restart`) builds the current checkout into the other folder while the server keeps serving. A failed build leaves it serving and shows why. Once built, no new ticket run or agent turn starts: queued requests and feedback stay saved for the new server. When every agent at work has finished, a detached launcher stops the server and starts the new build. An agent can request it and simply end its turn.
+
 Choose the agent model in **Settings**. Claude models run through the Claude Agent SDK, Codex models through the Codex CLI, and Gemini models through the local Antigravity CLI (`agy`). The board MCP tool and act-mode subagents are Claude-only; Codex and Gemini panel turns use structured output and act mode works alone. Claude runs are capped at a 200k-token context.
 
 Opening Settings never checks the model catalog: it answers from the stored one, so the dropdown is usable immediately. **Refresh models** is the only thing that runs discovery. Concurrent refresh requests share the in-flight check. Each provider has a **12-second timeout** and fails independently, so an unavailable tool does not discard the other providers' results. A provider offers only the models the version of the tool asking is entitled to, so Settings names the CLI version that answered, and discovery keeps each tool current: Claude Code and `agy` update themselves, and a refresh also runs `codex update` (at most once a minute) when npm has a newer Codex than the one installed, or the installed one cannot say its version. The update runs in the background: Claude and Gemini answer without waiting, and the new Codex's models are stored once it lands. It never starts while a Codex run is active, runs started meanwhile wait for it, and it is never killed halfway.
@@ -93,6 +97,7 @@ Run checks with `npm test`, `npm run lint`, and `npm run build`. Tests use tempo
 - `lib/server/project-attachments.ts`, `project-history.ts` — immutable attachment assets and full output history
 - `lib/server/runs.ts` — ticket scheduling (file claims, auto-run), review gating, feedback via session resume
 - `lib/server/run-registry.ts`, `run-limiter.ts`, `ticket-session.ts`, `project-lifecycle.ts` — process ownership, shared capacity, ticket execution, and orderly project removal
+- `lib/server/restart.ts`, `bin/autoproject` — update & restart when idle
 - `lib/server/project-agent.ts` — the project agent: one resumed session, panel/act preambles, worker/scout subagents
 - `lib/server/board-tools.ts` — the in-process MCP server (`add_tickets`, `set_notes`) and the structured-output fallback
 - `lib/server/agent.ts`, `agent-types.ts` — provider interface and dispatch to `claude.ts`, `codex.ts`, or `gemini.ts`
