@@ -22,7 +22,7 @@ The launcher builds and starts the production app at `http://127.0.0.1:4123`, re
 
 The launcher builds and serves from `.next-live/a` or `.next-live/b` (`AUTOPROJECT_DIST_DIR`), so a plain `npm run build` — an agent checking its work — writes `.next` and never touches the running app.
 
-**Update & restart** (the header button, or `./bin/autoproject --restart`) builds the current checkout into the other folder while the server keeps serving. A failed build leaves it serving and shows why. Once built, no new ticket run or agent turn starts: queued requests and feedback stay saved for the new server. When every agent at work has finished, a detached launcher stops the server and starts the new build. An agent can request it and simply end its turn.
+**Update & restart** (`./bin/autoproject --restart`, for agents; there is no button) builds the current checkout into the other folder while the server keeps serving. A failed build leaves it serving; the command says so, and the server log shows why. Once built, no new ticket run or agent turn starts: queued requests and feedback stay saved for the new server. When every agent at work has finished, a detached launcher stops the server and starts the new build. An agent can request it and simply end its turn.
 
 Choose the agent model in **Settings**. Claude models run through the Claude Agent SDK, Codex models through the Codex CLI, and Gemini models through the local Antigravity CLI (`agy`). The board MCP tool and act-mode subagents are Claude-only; Codex and Gemini panel turns use structured output and act mode works alone. Claude runs are capped at a 200k-token context.
 

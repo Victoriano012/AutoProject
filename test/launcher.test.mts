@@ -87,12 +87,12 @@ test("launcher --restart asks the running server and reports whether the update 
       writeFileSync(join(root, "restart"), status);
       return spawnSync("bash", [launcher, "--restart"], { env, encoding: "utf8", timeout: 10000 });
     };
-    assert.match(restart('{"phase":"waiting","agents":0}').stderr, /No AutoProject server/);
+    assert.match(restart('{"phase":"waiting"}').stderr, /No AutoProject server/);
     writeFileSync(ready, "ready");
-    const failed = restart('{"phase":"failed","agents":0,"error":"Type error"}');
+    const failed = restart('{"phase":"failed"}');
     assert.equal(failed.status, 1);
     assert.match(failed.stderr, /failed to build; the running server keeps serving/);
-    const built = restart('{"phase":"waiting","agents":2}');
+    const built = restart('{"phase":"waiting"}');
     assert.equal(built.status, 0, built.stderr);
     assert.match(built.stdout, /restarts once no agent is working/);
     assert.equal(existsSync(trace), false);
