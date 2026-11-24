@@ -84,3 +84,32 @@ test("runner subscriptions, state and flush callbacks survive a module replaceme
   assert.equal(isTicketRunLive("new-run"), true);
   unsubscribe();
 });
+
+test("a message waiting through a server restart stays on screen until the next server's snapshot", async (t) => {
+  const feeds: FakeFeed[] = [];
+  class FakeFeed {
+    onmessage?: (event: { data: string }) => void;
+    onerror?: () => void;
+    constructor() { feeds.push(this); }
+    close() {}
+  }
+  Object.defineProperty(globalThis, "EventSource", { configurable: true, value: FakeFeed });
+  t.after(() => { Reflect.deleteProperty(globalThis, "EventSource"); useStore.setState({ projectId: null, projectLoaded: false }); });
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const { agentRequests } = await import("../lib/runner.ts");
+  const { openProject } = await import("../lib/sync.ts");
+  const project = defaultProject("A");
+  globalThis.fetch = async () => Response.json({ data: project });
+  await openProject("A");
+  const waiting = { id: "r1", mode: "act", text: "Sent while the update waited", state: "queued" } as const;
+  const snapshot = (requests: RunStateSnapshot["agent"]["requests"]) =>
+    ({ data: JSON.stringify({ type: "snapshot", project, runs: { ...runs(), agent: { ...runs().agent, requests } } }) });
+  feeds[0].onmessage!(snapshot([waiting]));
+  assert.deepEqual(agentRequests(), [waiting]);
+  feeds[0].onerror!(); // the old server ended its feed on the way out
+  t.mock.timers.tick(2000);
+  assert.equal(feeds.length, 2, "the tab reconnects on its own");
+  assert.deepEqual(agentRequests(), [waiting]);
+  feeds[1].onmessage!(snapshot([{ ...waiting, state: "running", heard: true }]));
+  assert.equal(agentRequests()[0].heard, true);
+});

@@ -109,14 +109,14 @@ function applyRemote(fn: () => void): void {
   }
 }
 
-function closeStream(): void {
+function closeStream(keepRuns = false): void {
   if (reopenTimer) clearTimeout(reopenTimer);
   if (watchdog) clearInterval(watchdog);
   reopenTimer = null;
   watchdog = null;
   source?.close();
   source = null;
-  setRuns(NO_RUNS);
+  if (!keepRuns) setRuns(NO_RUNS);
 }
 
 function setRuns(runs: RunStateSnapshot): void {
@@ -128,8 +128,11 @@ function setRuns(runs: RunStateSnapshot): void {
  * log lines produced by runs this tab may not have started. EventSource
  * reconnects on its own, and every connection opens with a snapshot, so a
  * reload or a dropped connection catches up in one step. */
-function openStream(dir: string): void {
-  closeStream();
+function openStream(dir: string, reopen = false): void {
+  // A reopen keeps the run state — the messages still waiting included — on
+  // screen until the new connection's snapshot replaces it: a restart must
+  // not blank the chat's pending bubbles for as long as the server is down.
+  closeStream(reopen);
   if (typeof EventSource === "undefined") return;
   const es = new EventSource(`/api/runs/stream?dir=${encodeURIComponent(dir)}`);
   source = es;
@@ -157,7 +160,7 @@ function openStream(dir: string): void {
     watchdog = null;
     reopenTimer = setTimeout(() => {
       reopenTimer = null;
-      if (useStore.getState().projectId === dir) openStream(dir);
+      if (useStore.getState().projectId === dir) openStream(dir, true);
     }, 2000);
   };
   es.onerror = reconnect;

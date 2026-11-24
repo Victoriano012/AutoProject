@@ -116,3 +116,22 @@ test("the next server starts what was pressed or due during the wait, but not a 
     rmSync(dir, { force: true, recursive: true });
   }
 });
+
+test("shutting down ends every open live feed, so the old server can exit and its tabs reconnect", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "autoproject-feed-"));
+  writeProject(dir, defaultProject("Feed", dir));
+  const { GET } = await import("../app/api/runs/stream/route.ts");
+  try {
+    const res = await GET(new Request(`http://localhost/api/runs/stream?dir=${encodeURIComponent(dir)}`));
+    // Next waits on open connections before it exits; an ended feed must not leave one.
+    assert.equal(res.headers.get("connection"), "close");
+    const feed = res.body!.getReader();
+    assert.match(new TextDecoder().decode((await feed.read()).value), /"type":"snapshot"/);
+    process.emit("SIGTERM");
+    let read = await feed.read();
+    while (!read.done) read = await feed.read();
+  } finally {
+    await store.forget(dir);
+    rmSync(dir, { force: true, recursive: true });
+  }
+});

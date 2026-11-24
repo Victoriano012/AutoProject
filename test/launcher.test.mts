@@ -81,6 +81,19 @@ test("launcher --replace stops the old server and serves the update's build with
   });
 });
 
+test("launcher --replace kills an old server that is still holding a connection open", () => {
+  fixture(({ launcher, env, trace }) => {
+    // Next's shutdown waits on open requests; this one ignores SIGTERM outright.
+    const old = Number(execSync(`bash -c 'trap "" TERM; exec sleep 30' >/dev/null 2>&1 & echo $!`, { encoding: "utf8" }));
+    const result = spawnSync("bash", [launcher, "--replace", String(old), "--no-open"], {
+      env: { ...env, AUTOPROJECT_DIST_DIR: ".next-live/b", AUTOPROJECT_STOP_TIMEOUT: "1" }, encoding: "utf8", timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.throws(() => process.kill(old, 0));
+    assert.equal(readFileSync(trace, "utf8").trim(), ".next-live/b run start -- --hostname 127.0.0.1 --port 4123");
+  });
+});
+
 test("launcher --restart asks the running server and reports whether the update built", () => {
   fixture(({ root, launcher, env, ready, trace }) => {
     const restart = (status: string) => {
