@@ -86,7 +86,9 @@ export function ensureLoaded(dir: string): Project | null {
         ? { ...request, state: "error" as const, error: "Server restarted during this request. Retry to continue." }
         : { ...request },
     ));
-    if (Object.keys(project.pendingFeedback ?? {}).length) queueMicrotask(() => autoRun(dir));
+    // Queued cards start, pending feedback included: what was due or asked for
+    // while an update waited to restart is still todo, unpaused, on disk.
+    queueMicrotask(() => autoRun(dir));
     if ((registry.requests.get(dir) ?? []).some((request) => request.state === "queued")) {
       void import("./project-agent").then(({ resumeQueuedAgent }) => {
         if (!registry.removing.has(dir)) resumeQueuedAgent(dir);
@@ -383,6 +385,8 @@ export async function runTicket(dir: string, ticketId: string): Promise<void> {
   // nothing.
   const held = holdReason(dir, ticketId);
   if (held) {
+    // Queued, so the scheduler starts it once free, on this server or the next.
+    store.updateTicket(dir, ticketId, (t) => ({ ...t, status: "todo" }));
     store.appendLog(dir, ticketId, { kind: "info", text: held, ts: Date.now() });
     return;
   }

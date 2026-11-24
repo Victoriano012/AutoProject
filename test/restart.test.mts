@@ -6,14 +6,16 @@ import { join } from "node:path";
 import { holdingForRestart, restartStatus, updateAndRestart } from "../lib/server/restart.ts";
 import { registry, ticketKey } from "../lib/server/run-registry.ts";
 import { runLimiter } from "../lib/server/run-limiter.ts";
-import { ensureLoaded, runTicket, sendFeedback } from "../lib/server/runs.ts";
+import { autoRun, ensureLoaded, ownsTicket, runTicket, sendFeedback, stopProject } from "../lib/server/runs.ts";
 import { sendToAgent } from "../lib/server/project-agent.ts";
 import * as store from "../lib/server/project-store.ts";
 import { readProject, writeProject } from "../lib/projects-fs.ts";
 import { defaultProject, type Ticket } from "../lib/types.ts";
 
 const ticket = (id: string, status: Ticket["status"], files: string[]): Ticket => ({ id, title: id, description: "", files, status, log: [] });
-const until = async (ok: () => boolean) => { while (!ok()) await new Promise((r) => setTimeout(r, 5)); };
+const until = async (ok: () => boolean) => {
+  for (const end = Date.now() + 5000; !ok(); await new Promise((r) => setTimeout(r, 5))) assert.ok(Date.now() < end, "timed out");
+};
 
 test("a failed build keeps the server serving and reports why", async () => {
   let swapped = false;
@@ -28,7 +30,6 @@ test("once built, nothing new starts; the swap waits for every agent at work", a
   writeProject(dir, { ...defaultProject("Restart", dir), tickets: [
     ticket("busy", "running", ["a.ts"]), ticket("next", "todo", ["b.ts"]), ticket("done", "review", ["c.ts"]),
   ] });
-  ensureLoaded(dir);
   // Were the hold to fail, a started run would park on this slot, not reach a provider.
   process.env.AUTOPROJECT_MAX_RUNS = "1";
   const releaseSlot = await runLimiter.acquire("claude", new AbortController().signal);
@@ -39,6 +40,7 @@ test("once built, nothing new starts; the swap waits for every agent at work", a
     const restart = updateAndRestart({ build: async () => null, swap: (distDir) => { swappedTo = distDir; } });
     await until(() => restartStatus().phase === "waiting");
     assert.equal(restartStatus().agents, 1);
+    ensureLoaded(dir); // loading starts queued cards, so only once held
 
     await runTicket(dir, "next");
     assert.equal(registry.controllers.has(ticketKey(dir, "next")), false);
@@ -66,6 +68,51 @@ test("once built, nothing new starts; the swap waits for every agent at work", a
     registry.removing.add(dir);
     registry.requests.delete(dir);
     registry.pendingFeedback.delete(ticketKey(dir, "done"));
+    await store.forget(dir);
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
+test("the next server starts what was pressed or due during the wait, but not a paused card", async () => {
+  // Each test plays a server; the one before this ended in its restart.
+  const server = (globalThis as unknown as { __autoprojectRestart: { phase: string } }).__autoprojectRestart;
+  server.phase = "idle";
+  const dir = mkdtempSync(join(tmpdir(), "autoproject-restart-"));
+  writeProject(dir, { ...defaultProject("Restart", dir), tickets: [
+    ticket("busy", "running", ["a.ts"]),
+    ticket("due", "todo", ["a.ts"]), // the scheduler's once "busy" frees a.ts
+    ticket("pressed", "error", ["b.ts"]), // its Retry is pressed during the wait
+    { ...ticket("paused", "todo", ["c.ts"]), paused: true },
+  ] });
+  process.env.AUTOPROJECT_MAX_RUNS = "1";
+  const releaseSlot = await runLimiter.acquire("claude", new AbortController().signal);
+  registry.controllers.set(ticketKey(dir, "busy"), new AbortController());
+  ensureLoaded(dir);
+  try {
+    const restart = updateAndRestart({ build: async () => null, swap: () => {} });
+    await until(() => restartStatus().phase === "waiting");
+    await runTicket(dir, "pressed");
+    // "busy" finishes; the end of its run asks the scheduler, which holds.
+    store.updateTicket(dir, "busy", (t) => ({ ...t, status: "review" }));
+    registry.controllers.delete(ticketKey(dir, "busy"));
+    autoRun(dir);
+    await restart;
+    assert.equal(ownsTicket(dir, "due") || ownsTicket(dir, "pressed"), false);
+
+    // The next server reads the board back from disk.
+    await store.forget(dir);
+    registry.requests.delete(dir);
+    server.phase = "idle";
+    ensureLoaded(dir);
+    await until(() => ownsTicket(dir, "due") && ownsTicket(dir, "pressed"));
+    assert.equal(ownsTicket(dir, "paused"), false);
+  } finally {
+    stopProject(dir, true);
+    await registry.loopTasks.get(dir);
+    releaseSlot();
+    delete process.env.AUTOPROJECT_MAX_RUNS;
+    registry.removing.add(dir);
+    registry.requests.delete(dir);
     await store.forget(dir);
     rmSync(dir, { force: true, recursive: true });
   }
