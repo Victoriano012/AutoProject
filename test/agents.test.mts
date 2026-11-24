@@ -73,8 +73,18 @@ test("new Codex work opens a thread with the selected model and workspace", () =
       approvalPolicy: "never",
       sandbox: "danger-full-access",
       config: { model_reasoning_effort: "high" },
+      threadSource: "chatgpt_hidden",
     },
   });
+});
+
+test("Codex threads stay out of the ChatGPT app and still resume", () => {
+  const req = { model: "gpt-5.6-sol", workspaceDir: "/tmp/autoproject-test-workspace" };
+  assert.equal(codexThread(req).params.threadSource, "chatgpt_hidden");
+  // thread/resume takes no source: the thread keeps the one it started with.
+  const resumed = codexThread({ ...req, sessionId: "codex:thread-1" });
+  assert.equal(resumed.method, "thread/resume");
+  assert.equal("threadSource" in resumed.params, false);
 });
 
 test("Codex planner resumes keep their thread, read-only", () => {

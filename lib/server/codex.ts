@@ -47,6 +47,10 @@ export function codexThread(
       approvalPolicy: "never",
       sandbox: req.writeAccess ? "danger-full-access" : "read-only",
       ...(effort && { config: { model_reasoning_effort: effort } }),
+      // The ChatGPT desktop app leaves threads of this source out of its
+      // sidebar and search. The thread is still saved, so resuming works, and
+      // a resume keeps the source it started with.
+      ...(!resume && { threadSource: "chatgpt_hidden" }),
     },
   };
 }
