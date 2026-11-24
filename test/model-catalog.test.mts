@@ -37,17 +37,17 @@ test("discovery learns Sol-6.1 and capabilities without inferring from names", (
   assert.deepEqual(parseCodexModels([{ model: "hidden", hidden: true }, { id: "wrong" }]), []);
 });
 
-test("Claude models are listed under the ID their alias resolves to", () => {
+test("Claude aliases are kept, and the ID an alias points at is not listed again", () => {
   const models = parseClaudeModels([
     { value: "sonnet", resolvedModel: "claude-new-sonnet", displayName: "Sonnet", description: "", supportedEffortLevels: ["low", "high"] },
+    { value: "claude-new-sonnet", displayName: "Sonnet", description: "" },
     { value: "unknown", displayName: "Unknown", description: "" },
     { value: "disabled", displayName: "Disabled", description: "", supportsEffort: false, supportedEffortLevels: ["high"] },
   ]);
-  // "sonnet" names whatever is current, so a catalog keyed on aliases is
-  // identical before and after a release. Key it on what the alias points at.
-  assert.deepEqual(models.map((m) => [m.value, m.label]), [["claude-new-sonnet", "Sonnet"], ["unknown", "Unknown"], ["disabled", "Disabled"]]);
-  assert.equal(providerForModel("claude-new-sonnet", models), "claude");
-  assert.deepEqual(reasoningEffortsForModel("claude-new-sonnet", models), ["low", "high"]);
+  // "sonnet" always means the newest Sonnet, so saving it follows each release.
+  assert.deepEqual(models.map((m) => [m.value, m.label]), [["sonnet", "Sonnet"], ["unknown", "Unknown"], ["disabled", "Disabled"]]);
+  assert.equal(providerForModel("sonnet", models), "claude");
+  assert.deepEqual(reasoningEffortsForModel("sonnet", models), ["low", "high"]);
   assert.deepEqual(reasoningEffortsForModel("unknown", models), []);
   assert.deepEqual(reasoningEffortsForModel("disabled", models), []);
 });
@@ -67,17 +67,17 @@ test("only the newest release of each family is offered, and a hidden one stays 
     { value: "haiku", displayName: "Haiku", description: "" },
   ]);
   assert.deepEqual(latestPerFamily(claude).map((m) => m.value), ["opus", "sonnet", "haiku"]);
-  // Claude spells 5.5 as `-5-5`. Read as separate parts, every release becomes
-  // its own family and the entire back catalogue stays on the list.
-  const resolved = parseClaudeModels([
-    { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus", description: "Opus 5.5 \u00b7 x" },
-    { value: "a", resolvedModel: "claude-opus-5", displayName: "Opus", description: "Opus 5 \u00b7 x" },
-    { value: "b", resolvedModel: "claude-opus-4-8", displayName: "Opus", description: "Opus 4.8 \u00b7 x" },
-    { value: "c", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku", description: "Haiku 4.5 \u00b7 x" },
-    { value: "d", resolvedModel: "claude-haiku-5-5", displayName: "Haiku", description: "Haiku 5.5 \u00b7 x" },
+  // What the SDK lists today: aliases plus every pinned release back to 4.5,
+  // each spelling its version differently. Only the newest of each survives.
+  const row = (value: string, version: string, resolvedModel?: string) =>
+    ({ value, resolvedModel, displayName: version.split(" ")[0], description: `${version} \u00b7 x` });
+  const sdk = parseClaudeModels([
+    row("opus", "Opus 5.5", "claude-opus-5-5"), row("claude-opus-5-5", "Opus 5.5"), row("claude-opus-5", "Opus 5"),
+    row("sonnet", "Sonnet 5.5", "claude-sonnet-5-5"), row("claude-sonnet-5", "Sonnet 5"), row("claude-sonnet-4-6", "Sonnet 4.6"),
+    row("fable", "Fable 5.2", "claude-fable-5-2"), row("claude-fable-5-1", "Fable 5.1"), row("claude-fable-5", "Fable 5"),
+    row("haiku", "Haiku 5.5", "claude-haiku-5-5"), row("claude-haiku-4-5-20251001", "Haiku 4.5"), row("claude-opus-4-8", "Opus 4.8"),
   ] as never);
-  assert.deepEqual(latestPerFamily(resolved).map((m) => [m.value, m.label]),
-    [["claude-opus-5-5", "Opus 5.5"], ["claude-haiku-5-5", "Haiku 5.5"]]);
+  assert.deepEqual(latestPerFamily(sdk).map((m) => m.label), ["Opus 5.5", "Sonnet 5.5", "Fable 5.2", "Haiku 5.5"]);
   // A superseded model someone already picked must remain visible and routable.
   const listed = withSelectedModel(latestPerFamily(codex), "gpt-5.6-sol", codex);
   assert.deepEqual(listed.at(-1), { value: "gpt-5.6-sol", label: "Sol 5.6 (saved selection)", provider: "codex", reasoningEfforts: [], defaultReasoningEffort: undefined });
@@ -270,7 +270,7 @@ test("Claude's Default alias is not a model, and picking it still resolves", () 
     // The SDK carries the version in the description, not the display name.
     { value: "opus", resolvedModel: "claude-opus-5", displayName: "Opus", description: "Opus 5.5 \u00b7 Best for everyday, complex tasks", supportedEffortLevels: ["low", "high"] },
   ]);
-  assert.deepEqual(models.map((m) => [m.value, m.label]), [["claude-opus-5", "Opus 5.5"]]);
+  assert.deepEqual(models.map((m) => [m.value, m.label]), [["opus", "Opus 5.5"]]);
   // Someone already saved it: it must stay visible, selectable and Claude-routed.
   const listed = withSelectedModel(models, "default");
   assert.equal(listed.length, 2);
@@ -310,9 +310,9 @@ test("a newly released model reaches the list Settings renders, for every provid
   let released = false;
   const discover = async (provider: string): Promise<Discovery> => {
     if (provider === "codex") return { models: latestPerFamily(parseCodexModels(
-      released ? [{ model: "gpt-7-nova", displayName: "GPT-7-Nova", hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "high" }], defaultReasoningEffort: "high" }, ...CODEX_ROWS] : CODEX_ROWS)) };
+      released ? [{ model: "gpt-6.2-sol", displayName: "GPT-6.2-Sol", hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "high" }], defaultReasoningEffort: "high" }, ...CODEX_ROWS] : CODEX_ROWS)) };
     if (provider === "claude") return { models: latestPerFamily(parseClaudeModels(CLAUDE_ROWS.map((row) =>
-      // The alias "opus" is unchanged by the release; what it resolves to is not.
+      // The alias "opus" is unchanged by the release; what it points at is not.
       released && row.value === "opus"
         ? { ...row, resolvedModel: "claude-opus-6", description: "Opus 6 \u00b7 Best for everyday, complex tasks" }
         : row) as never)) };
@@ -321,12 +321,12 @@ test("a newly released model reaches the list Settings renders, for every provid
   const cache = createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover });
   const shown = async () => {
     const catalog = await cache.refresh();
-    return withSelectedModel(catalogModels(catalog), "claude-opus-5", knownModels(catalog)).map((m) => `${m.value}=${m.label}`);
+    return withSelectedModel(catalogModels(catalog), "gpt-6.1-sol", knownModels(catalog)).map((m) => `${m.value}=${m.label}`);
   };
   // Superseded releases, the hidden row, the "default" alias and agy's
   // non-Gemini rows are all meant to be absent; nothing else is.
   assert.deepEqual(await shown(), [
-    "claude-opus-5=Opus 5", "claude-fable-5[1m]=Fable 5", "claude-haiku-4-5-20251001=Haiku 4.5",
+    "opus=Opus 5", "claude-fable-5[1m]=Fable 5", "haiku=Haiku 4.5",
     "gpt-6.1-terra=Terra 6.1", "gpt-6.1-sol=Sol 6.1",
     "gemini-3.8-flash-high=Flash 3.8",
   ]);
@@ -334,12 +334,12 @@ test("a newly released model reaches the list Settings renders, for every provid
   // Every provider's new release is in the list, and the model that was saved
   // before it landed is still there to switch back to.
   assert.deepEqual(await shown(), [
-    "claude-opus-6=Opus 6", "claude-fable-5[1m]=Fable 5", "claude-haiku-4-5-20251001=Haiku 4.5",
-    "gpt-7-nova=Nova 7", "gpt-6.1-terra=Terra 6.1", "gpt-6.1-sol=Sol 6.1",
+    "opus=Opus 6", "claude-fable-5[1m]=Fable 5", "haiku=Haiku 4.5",
+    "gpt-6.2-sol=Sol 6.2", "gpt-6.1-terra=Terra 6.1",
     "gemini-3.8-flash-high=Flash 3.8", "gemini-4-pro-high=Pro 4",
-    "claude-opus-5=Opus 5 (saved selection)",
+    "gpt-6.1-sol=Sol 6.1 (saved selection)",
   ]);
-  assert.equal(reasoningEffortsForModel("gpt-7-nova", catalogModels(await cache.refresh())).join(), "high");
+  assert.equal(reasoningEffortsForModel("gpt-6.2-sol", catalogModels(await cache.refresh())).join(), "high");
 });
 
 test("a provider that fails says which one and why, without leaking the raw error", async (t) => {
@@ -371,14 +371,14 @@ test("a provider that fails says which one and why, without leaking the raw erro
   assert.deepEqual(empty.providers.codex.models, [sol]);
 });
 
-test("a release the version rule cannot order is still offered, and one bad row stays one bad row", async (t) => {
-  // Neither a version-less ID nor a trailing-version one is a later release of
-  // gpt-6.1-sol, so neither may be dropped as superseded by it.
+test("families come from the name shown, whatever the ID looks like, and one bad row stays one bad row", async (t) => {
+  // Sol 2 reads as an older Sol than Sol 6.1, so it goes; a Sol with no
+  // version cannot be ordered against either, so it stays.
   const codex = parseCodexModels([
     { model: "gpt-6.1-sol", displayName: "GPT-6.1-Sol" }, { model: "gpt-sol", displayName: "GPT-Sol" },
     { model: "gpt-sol-2", displayName: "GPT-Sol-2" }, { model: "gpt-6-sol", displayName: "GPT-6-Sol" },
   ]);
-  assert.deepEqual(latestPerFamily(codex).map((m) => m.value), ["gpt-6.1-sol", "gpt-sol", "gpt-sol-2"]);
+  assert.deepEqual(latestPerFamily(codex).map((m) => m.value), ["gpt-6.1-sol", "gpt-sol"]);
   // agy IDs are not limited to word characters.
   assert.deepEqual(parseGeminiModels("gemini-4-pro[1m]-high\tGemini 4 Pro 1M (High)\n").map((m) => m.value), ["gemini-4-pro[1m]-high"]);
   // Nothing recognisable left: keep the name the tool gave rather than none.

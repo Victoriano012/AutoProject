@@ -119,12 +119,10 @@ export function createModelCatalog(options: {
   return { read, refresh };
 }
 
-// Next may evaluate server modules in more than one route bundle. Share the
-// in-flight refresh and memory fallback across those bundles and dev reloads.
-const globalCatalog = globalThis as typeof globalThis & {
-  autoProjectModelCatalog?: ReturnType<typeof createModelCatalog>;
-};
-export const modelCatalog = globalCatalog.autoProjectModelCatalog ??= createModelCatalog({
+// Not pinned on globalThis: a pinned instance kept running the discovery code
+// it was created with, so a dev server never picked up a fix. The disk file is
+// what route bundles share.
+export const modelCatalog = createModelCatalog({
   file: () => path.join(os.homedir(), ".autoproject", "model-catalog.json"),
   discover: async (provider) => (await import("./model-discovery")).discoverers[provider](),
 });

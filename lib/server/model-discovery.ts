@@ -102,13 +102,13 @@ function claudeLabel(row: ModelInfo): string {
 }
 
 export function parseClaudeModels(rows: ModelInfo[]): ModelChoice[] {
+  // `opus` always means the newest Opus, so a saved alias follows each release
+  // by itself. Keep the alias and drop the pinned ID it currently points at.
+  const aliased = new Set(rows.filter((r) => r.value !== "default" && r.resolvedModel !== r.value).map((r) => r.resolvedModel));
   return rows.flatMap((row) => {
     // "default" is an alias for another listed model, not a model of its own.
-    if (!row.value?.trim() || row.value === "default") return [];
-    // `opus` and `sonnet` are moving aliases: they name whatever is current, so
-    // a catalog built from them is byte-identical before and after a release.
-    // Store what the alias resolves to, which is the thing that actually changes.
-    return [normalizeChoice({ value: row.resolvedModel?.trim() || row.value, label: claudeLabel(row),
+    if (!row.value?.trim() || row.value === "default" || aliased.has(row.value)) return [];
+    return [normalizeChoice({ value: row.value, label: claudeLabel(row),
       provider: "claude" as const,
       reasoningEfforts: row.supportsEffort === false ? [] : efforts(row.supportedEffortLevels) })];
   });
@@ -181,8 +181,6 @@ export async function discoverGemini(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<
   return { models, version };
 }
 
-const VERSION = /^\d+(?:\.\d+)*$/;
-
 function newer(a: number[], b: number[]): boolean {
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
     const step = (a[i] ?? 0) - (b[i] ?? 0);
@@ -191,32 +189,22 @@ function newer(a: number[], b: number[]): boolean {
   return false;
 }
 
-/** The tools list every release they still accept, so `gpt-6.1-sol` arrives
- * beside `gpt-6-sol` and `gpt-5.6-sol`. Keep the newest of each family and drop
- * the superseded ones; a family with no newer release stays listed, and an ID
- * carrying no version (Claude's aliases) is its own family. Saved selections
- * that this hides stay visible and routable through the retained history. */
+/** The tools list every release they still accept. Keep the newest of each
+ * family and drop the rest. Labels are already normalised to "family version"
+ * (Opus 5.5, Sol 6.1, Flash 3.8) whatever shape each provider gives its IDs,
+ * so they are where every provider agrees on what a family and a version are.
+ * A label with no version is its own family. Saved selections this hides stay
+ * visible and routable through the retained history. */
 export function latestPerFamily(models: ModelChoice[]): ModelChoice[] {
-  const versions = new Map<string, number[]>();
-  const latest = new Map<string, ModelChoice>();
+  const latest = new Map<string, { model: ModelChoice; version: number[] }>();
   for (const model of models) {
-    const parts = model.value.split("-");
-    const at = parts.findIndex((part) => VERSION.test(part));
-    // Codex writes 6.1 as `6.1`, Claude writes 5.5 as `-5-5`, so a version is a
-    // run of numbers, not one part. It also keeps its slot: `gpt-6-sol` and
-    // `gpt-6.1-sol` are the same family, but `gpt-sol` and `gpt-terra-2` are
-    // not — different shapes name different things, and guessing costs us a
-    // release we should have shown.
-    let end = at;
-    while (end >= 0 && end + 1 < parts.length && VERSION.test(parts[end + 1])) end++;
-    const family = at < 0 ? model.value : [...parts.slice(0, at), "*", ...parts.slice(end + 1)].join("-");
-    const version = at < 0 ? [] : parts.slice(at, end + 1).flatMap((part) => part.split(".").map(Number));
-    const best = versions.get(family);
-    if (best && !newer(version, best)) continue;
-    versions.set(family, version);
-    latest.set(family, model);
+    const match = /^(.+) (\d+(?:\.\d+)*)$/.exec(model.label);
+    const family = match ? match[1] : `\0${model.value}`;
+    const version = match ? match[2].split(".").map(Number) : [];
+    const best = latest.get(family);
+    if (!best || newer(version, best.version)) latest.set(family, { model, version });
   }
-  return [...latest.values()];
+  return [...latest.values()].map(({ model }) => model);
 }
 
 const newest = (discover: () => Promise<Discovery>) => async (): Promise<Discovery> => {
