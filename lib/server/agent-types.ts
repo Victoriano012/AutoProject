@@ -23,7 +23,7 @@ export type AgentEvent =
   | { type: "text"; text: string; sub?: boolean }
   | { type: "tool"; text: string; sub?: boolean }
   /** Claude only: the main agent started a subagent (an Agent tool call), and
-   * that call came back. */
+   * that subagent finished — in the background, maybe turns later. */
   | { type: "subagent"; id: string; description: string; agentType?: string }
   | { type: "subagent-end"; id: string }
   | {
@@ -58,8 +58,6 @@ export interface AgentRequest {
   agents?: Record<string, AgentDefinition>;
   /** Forward subagent text too, not just their tool calls. */
   forwardSubagentText?: boolean;
-  /** Keep the CLI from backgrounding shells and subagents (see the env below). */
-  disableBackgroundTasks?: boolean;
 }
 
 export interface AgentResult {

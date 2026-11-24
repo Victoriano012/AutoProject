@@ -28,6 +28,8 @@ import { ensureLoaded, notifyAgent, registry } from "./runs";
  * persisted project state. Interrupted turns remain available for retry.
  */
 
+/** Both run in the background, so the agent stays free to answer the person
+ * while they work and hears each one's report when it is done. */
 export const ACT_AGENTS: Record<string, AgentDefinition> = {
   worker: {
     description:
@@ -37,6 +39,7 @@ export const ACT_AGENTS: Record<string, AgentDefinition> = {
     permissionMode: "bypassPermissions",
     maxTurns: 80,
     model: "inherit",
+    background: true,
   },
   scout: {
     description: "Read-only exploration: find files, trace code paths, summarize.",
@@ -44,6 +47,7 @@ export const ACT_AGENTS: Record<string, AgentDefinition> = {
     tools: ["Read", "Grep", "Glob", "Bash"],
     permissionMode: "dontAsk",
     maxTurns: 40,
+    background: true,
   },
 };
 
@@ -53,7 +57,7 @@ export function systemAppend(project: Project): string {
   return [
     `You are the single agent behind the project '${project.name}'.` +
       (description ? ` ${description}${/[.!?]$/.test(description) ? "" : "."}` : ""),
-    `You have two ways of working, told to you at the top of each message: PANEL — you plan; you never modify files; you turn the human's message into tickets with mcp__board__add_tickets and record standing preferences with mcp__board__set_notes. ACT — you do the work yourself in the workspace and use the Agent tool (subagent_type 'worker' for independent coding subtasks that can run in parallel, 'scout' for read-only exploration) and keep the coordinating work yourself. The conversation is continuous across both.`,
+    `You have two ways of working, told to you at the top of each message: PANEL — you plan; you never modify files; you turn the human's message into tickets with mcp__board__add_tickets and record standing preferences with mcp__board__set_notes. ACT — you do the work yourself in the workspace and use the Agent tool (subagent_type 'worker' for independent coding subtasks that can run in parallel, 'scout' for read-only exploration) and keep the coordinating work yourself. Subagents run in the background: after starting them, end your turn with a short note rather than waiting; the human can talk to you while they work, so answer at once, and you are told when each one finishes. The conversation is continuous across both.`,
     project.notes.length
       ? `\nStanding instructions for this project (always apply):\n${project.notes
           .map((n) => `- ${n}`)
@@ -127,7 +131,8 @@ function requests(dir: string): AgentRequest[] {
  * turns before it are done; the reply travels through the project feed. In the
  * chat (act) the person is talking to the agent at work, so while an act turn
  * runs the message goes straight into it instead — the agent hears it with its
- * next tool result — and it is written to the transcript now, as heard. */
+ * next tool result, or at once while it only waits on its subagents — and it
+ * is written to the transcript now, as heard. */
 export function sendToAgent(dir: string, mode: Mode, message: string): AgentRequest | null {
   if (registry.removing.has(dir)) throw new Error("Project is being removed");
   if (!ensureLoaded(dir)) throw new Error(`No project at ${dir}`);
@@ -322,9 +327,6 @@ async function turn(
           mode === "panel" ? ["Edit", "Write", "MultiEdit", "NotebookEdit", "Task"] : undefined,
         forwardSubagentText: mode === "act",
         agents: mode === "act" ? ACT_AGENTS : undefined,
-        // An act turn that backgrounds a command leaves an orphan that breaks
-        // the board tools on the next panel turn (see claude.ts).
-        disableBackgroundTasks: true,
         outputSchema: fallback ? REQUEST_SCHEMA : undefined,
       });
       for await (const ev of events) {

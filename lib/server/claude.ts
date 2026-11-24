@@ -65,7 +65,13 @@ export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<Agen
   // treats a message sent mid-turn like one typed into Claude Code while it
   // works, folding it in with the next tool result rather than after the turn
   // (a message that misses the turn's last tool call runs as its own turn on
-  // the same process). Closing the stream is what lets the process exit.
+  // the same process). Closing the stream is what lets the process exit, so
+  // it stays open until the turn is over and no background work (a subagent,
+  // a shell) is left: the agent answers messages while its subagents run, and
+  // the process never exits with a task still going. Such an orphan is found
+  // when the next turn resumes the session, and the CLI aborts every MCP call
+  // in flight as it marks it stopped: board tool calls then fail with "The
+  // tool call was interrupted before a result was received".
   const pending: SDKUserMessage[] = [];
   let wake = () => {};
   let closed = false;
@@ -110,14 +116,6 @@ export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<Agen
         ...(process.env as Record<string, string>),
         CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
         CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000",
-        // A background shell or agent dies with this process at the end of
-        // the turn, and the CLI resuming the session next turn finds the
-        // orphan, marks it stopped and, in the same breath, aborts every MCP
-        // call in that process: each board tool call then comes back as "The
-        // tool call was interrupted before a result was received", whether or
-        // not the handler ran. So the project agent, whose session is resumed
-        // turn after turn, is not allowed to background anything.
-        ...(req.disableBackgroundTasks ? { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" } : {}),
       },
       ...(resume ? { resume: resume.raw } : {}),
       // The workspace's CLAUDE.md only; the person's own settings and local
@@ -165,6 +163,14 @@ export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<Agen
   let sent = false;
   // What the next turn on this conversation starts by re-reading.
   let contextTokens: number | undefined;
+  // Whether the main agent's turn is over, how many sent messages the CLI
+  // still holds for it, and how many background tasks are still running.
+  let idle = false;
+  let queued = 0;
+  let background = 0;
+  const settle = () => {
+    if (idle && !queued && !background) endInput();
+  };
   const interrupt = () => {
     if (!live || sent) return;
     sent = true;
@@ -185,12 +191,24 @@ export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<Agen
     yield { type: "input", push };
     for await (const msg of q) {
       if (msg.type === "system" && msg.subtype === "init") {
+        // Every turn starts with one: a pushed message's, or the one in which
+        // the agent hears that a background task finished.
         live = true;
+        idle = false;
         if (req.signal.aborted) interrupt();
         yield {
           type: "init",
           sessionId: tagSession("claude", msg.session_id),
         };
+      } else if (msg.type === "system" && msg.subtype === "background_tasks_changed") {
+        // The whole set each time; ambient ones are watchers, not work. A stop
+        // while the agent waits on its tasks ends them, and so the process.
+        background = msg.tasks.filter((t) => !t.ambient).length;
+        settle();
+      } else if (msg.type === "system" && msg.subtype === "task_notification") {
+        // A subagent, foreground or background, is over when its task is;
+        // ids of other tasks (shells) match no subagent.
+        if (msg.tool_use_id) yield { type: "subagent-end", id: msg.tool_use_id };
       } else if (msg.type === "assistant") {
         const sub = msg.parent_tool_use_id !== null;
         const u = msg.message.usage;
@@ -219,15 +237,6 @@ export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<Agen
             }
           }
         }
-      } else if (msg.type === "user" && msg.parent_tool_use_id === null) {
-        // A tool result addressed to the main agent ends whichever subagent
-        // the same tool_use started (other tools' results match nothing).
-        const content = msg.message.content;
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block.type === "tool_result") yield { type: "subagent-end", id: block.tool_use_id };
-          }
-        }
       } else if (msg.type === "result") {
         // modelUsage is the SDK's own accounting field (main loop, subagents
         // and internal calls), cumulative over this query() call, so the last
@@ -247,10 +256,12 @@ export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<Agen
               text: `Agent stopped: ${msg.subtype}`,
               usage,
             };
-        // Stopping drops whatever was pushed and not yet heard; otherwise the
-        // process keeps going only while a pushed message still has to run.
+        // Stopping drops whatever was pushed and not yet heard; the stop has
+        // already ended the background tasks, before this result.
         if (req.signal.aborted) break;
-        if (!msg.queued_turn_count) endInput();
+        idle = true;
+        queued = msg.queued_turn_count ?? 0;
+        settle();
       }
     }
   } catch (err) {
