@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { createModelCatalog, catalogModels, knownModels } from "../lib/server/model-catalog.ts";
 import { DiscoveryError } from "../lib/server/discovery-error.ts";
-import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, updateCodex, type Discovery } from "../lib/server/model-discovery.ts";
+import { DISCOVERY_TIMEOUT_MS, parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, updateCodex, type Discovery } from "../lib/server/model-discovery.ts";
 import { holdCodex } from "../lib/server/codex.ts";
 import { latestPerFamily, modelChoice, MODEL_CHOICES, offeredModels, normalizeModelLabel, providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
 
@@ -281,19 +281,23 @@ console.log('gemini-4-pro-high\tGemini 4 Pro (High)');
 });
 
 test("CLI discovery is bounded and rejects missing tools and malformed responses", async (t) => {
+  // Mock time: the bound is reached by ticking the clock, and the other cases
+  // never run into it however slowly a busy machine starts the process.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const dir = fixture(t);
   const executable = path.join(dir, "fake-tool");
-  // The 80ms cases below assert the bound; these assert the rejection reason, so
-  // they get room for process start-up when the whole suite runs in parallel.
   setEnv(t, "AUTOPROJECT_CODEX_PATH", path.join(dir, "missing"));
-  await assert.rejects(discoverCodex(10_000), /is not installed/);
+  await assert.rejects(discoverCodex(), /is not installed/);
   fs.writeFileSync(executable, '#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n', { mode: 0o700 });
   setEnv(t, "AUTOPROJECT_CODEX_PATH", executable);
-  await assert.rejects(discoverCodex(80), /timed out/);
   setEnv(t, "AUTOPROJECT_AGY_PATH", executable);
-  await assert.rejects(discoverGemini(80), /timed out/);
+  for (const discover of [discoverCodex, discoverGemini]) {
+    const hung = discover();
+    t.mock.timers.tick(DISCOVERY_TIMEOUT_MS);
+    await assert.rejects(hung, /timed out/);
+  }
   fs.writeFileSync(executable, '#!/usr/bin/env node\nconsole.log("not-json");setInterval(() => {}, 1000);\n');
-  await assert.rejects(discoverCodex(10_000), /returned an unreadable response/);
+  await assert.rejects(discoverCodex(), /returned an unreadable response/);
 });
 
 test("an unwritable cache preserves successful discovery in memory", async (t) => {

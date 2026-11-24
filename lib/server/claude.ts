@@ -44,6 +44,11 @@ export function claudeExecutable(): string | undefined {
   }
 }
 
+/** Workers and the project agent resume a conversation for as long as the
+ * ticket lives, and the CLI deletes transcripts older than 30 days by default.
+ * Passed as `--settings`, so it holds without reading the person's settings. */
+export const CLAUDE_SETTINGS = { cleanupPeriodDays: 365 };
+
 /** Keep unsupported effort values out of the Claude SDK request. */
 export function claudeReasoningOptions(
   req: Pick<AgentRequest, "model" | "reasoningEffort">
@@ -118,6 +123,7 @@ export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<Agen
       // The workspace's CLAUDE.md only; the person's own settings and local
       // overrides are theirs, not the project's.
       settingSources: ["project"],
+      settings: CLAUDE_SETTINGS,
       ...(req.systemPromptAppend
         ? {
             systemPrompt: {

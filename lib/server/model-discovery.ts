@@ -1,7 +1,7 @@
 import { spawn, execFile } from "node:child_process";
 import os from "node:os";
 import { query, type ModelInfo, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { claudeExecutable } from "./claude";
+import { CLAUDE_SETTINGS, claudeExecutable } from "./claude";
 import { codexUpdating, holdCodex, updateWhenIdle } from "./codex";
 import { DiscoveryError } from "./discovery-error";
 import { newer, normalizeChoice, normalizeModelLabel, REASONING_LABELS, type ModelChoice, type ModelProvider, type ReasoningEffort } from "../models";
@@ -126,7 +126,7 @@ export async function discoverClaude(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<
     await new Promise<void>((resolve) => { endInput = resolve; });
   }
   const session = query({ prompt: input(), options: {
-    cwd: os.homedir(), settingSources: ["project"], persistSession: false,
+    cwd: os.homedir(), settingSources: ["project"], settings: CLAUDE_SETTINGS, persistSession: false,
     abortController, tools: [], mcpServers: {}, pathToClaudeCodeExecutable: claudeExecutable(),
   } });
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -168,13 +168,18 @@ export function parseGeminiModels(output: string): ModelChoice[] {
   return [...groups.values()].map(normalizeChoice);
 }
 
+// The bound is our own setTimeout, not execFile's `timeout`, so tests can drive it with mock timers.
 function run(executable: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(/* turbopackIgnore: true */ executable, args, {
-      cwd: os.homedir(), env: process.env, timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: MAX_OUTPUT,
-    }, (error, stdout) => error
-      ? reject(new DiscoveryError(error.code === "ENOENT" ? "is not installed" : error.killed ? "timed out" : "failed to answer"))
-      : resolve(stdout));
+    let timedOut = false;
+    const child = execFile(/* turbopackIgnore: true */ executable, args, {
+      cwd: os.homedir(), env: process.env, killSignal: "SIGKILL", maxBuffer: MAX_OUTPUT,
+    }, (error, stdout) => {
+      clearTimeout(timer);
+      if (error) reject(new DiscoveryError(error.code === "ENOENT" ? "is not installed" : timedOut ? "timed out" : "failed to answer"));
+      else resolve(stdout);
+    });
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs);
   });
 }
 
