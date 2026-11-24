@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DiscoveryError, discoveryReason } from "./discovery-error";
+import type { Discovery } from "./model-discovery";
 import { MODEL_CHOICES, REASONING_LABELS, type ModelChoice, type ModelProvider } from "../models";
 
 const PROVIDERS: ModelProvider[] = ["claude", "codex", "gemini"];
@@ -11,6 +12,8 @@ export interface ProviderCatalog {
   source: "discovered" | "cached" | "bundled";
   lastSuccessAt?: number;
   error?: string;
+  /** Version of the tool that answered: it decides which models exist. */
+  version?: string;
 }
 export interface ModelCatalog {
   version: 1;
@@ -51,7 +54,7 @@ export function knownModels(catalog: ModelCatalog): ModelChoice[] {
  * unless someone asks for a refresh. */
 export function createModelCatalog(options: {
   file: () => string;
-  discover: (provider: ModelProvider) => Promise<ModelChoice[]>;
+  discover: (provider: ModelProvider) => Promise<Discovery>;
   now?: () => number;
 }) {
   const now = options.now ?? Date.now;
@@ -65,7 +68,8 @@ export function createModelCatalog(options: {
         || !PROVIDERS.every((p) => {
           const entry = value.providers?.[p];
           return entry && validModels(entry.models, p) && ["bundled", "cached", "discovered"].includes(entry.source)
-            && (entry.lastSuccessAt === undefined || Number.isFinite(entry.lastSuccessAt));
+            && (entry.lastSuccessAt === undefined || Number.isFinite(entry.lastSuccessAt))
+            && (entry.version === undefined || (typeof entry.version === "string" && entry.version.length < 64));
         })) throw new Error("Invalid catalog cache");
       if (!memory || (value.checkedAt ?? 0) > (memory.checkedAt ?? 0)) memory = value;
     } catch { /* Missing/corrupt/unwritable cache never prevents running agents. */ }
@@ -88,17 +92,18 @@ export function createModelCatalog(options: {
     const previous = read();
     inFlight = (async () => {
       const results = await Promise.allSettled(PROVIDERS.map(async (provider) => {
+        const found = await options.discover(provider);
         // Per model, not per provider: one oddly shaped new release must not
         // take the whole list down with it.
-        const models = (await options.discover(provider)).filter((m) => validModels([m], provider));
+        const models = found.models.filter((m) => validModels([m], provider));
         if (!models.length) throw new DiscoveryError("returned no usable models");
-        return [...new Map(models.map((m) => [m.value, m])).values()];
+        return { models: [...new Map(models.map((m) => [m.value, m])).values()], version: found.version };
       }));
       const providers = { ...previous.providers };
       results.forEach((result, i) => {
         const provider = PROVIDERS[i];
         providers[provider] = result.status === "fulfilled"
-          ? { models: result.value, source: "discovered", lastSuccessAt: now() }
+          ? { models: result.value.models, source: "discovered", lastSuccessAt: now(), version: result.value.version }
           // Why, not just that: an unchanged list is otherwise indistinguishable
           // from a refresh that found nothing new.
           : { ...previous.providers[provider], source: previous.providers[provider].lastSuccessAt !== undefined ? "cached" : "bundled",

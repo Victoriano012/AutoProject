@@ -10,7 +10,7 @@
     "test": "node --import ./test/ts-resolve.mjs --test \"test/*.test.mts\""
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.251",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.331",
     "@vercel/analytics": "^2.0.1",
     "@vercel/speed-insights": "^2.0.0",
     "@xyflow/react": "^12.11.5",

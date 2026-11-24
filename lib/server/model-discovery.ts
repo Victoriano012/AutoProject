@@ -10,6 +10,10 @@ const efforts = (values: unknown): ReasoningEffort[] => Array.isArray(values)
   ? [...new Set(values.filter((v): v is ReasoningEffort => typeof v === "string" && Object.hasOwn(REASONING_LABELS, v)))]
   : [];
 
+/** The models a provider offers depend on the version of the tool that asks,
+ * so discovery reports that version beside what it found. */
+export interface Discovery { models: ModelChoice[]; version?: string }
+
 export function parseCodexModels(data: unknown): ModelChoice[] {
   if (!Array.isArray(data)) throw new DiscoveryError("returned an unreadable response");
   return data.flatMap((row) => {
@@ -23,7 +27,7 @@ export function parseCodexModels(data: unknown): ModelChoice[] {
 }
 
 /** Public app-server RPC only: no thread, turn, prompt, or credential reading. */
-export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelChoice[]> {
+export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<Discovery> {
   return new Promise((resolve, reject) => {
     const executable = process.env.AUTOPROJECT_CODEX_PATH?.trim() || "codex";
     const child = spawn(/* turbopackIgnore: true */ executable, ["app-server"], {
@@ -35,6 +39,7 @@ export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelCh
     let id = 1;
     let stage: "initialize" | "models" = "initialize";
     const models: ModelChoice[] = [];
+    let version: string | undefined;
     const cursors = new Set<string>();
     const finish = (error?: Error) => {
       if (done) return;
@@ -42,7 +47,7 @@ export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelCh
       clearTimeout(timer);
       child.stdin.end();
       child.kill("SIGKILL");
-      if (error) reject(error); else resolve(models);
+      if (error) reject(error); else resolve({ models, version });
     };
     const timer = setTimeout(() => finish(new DiscoveryError("timed out")), timeoutMs);
     const send = (message: object) => child.stdin.write(`${JSON.stringify(message)}\n`);
@@ -66,6 +71,8 @@ export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelCh
           if (message.error) return finish(new DiscoveryError("rejected the request"));
           if (stage === "initialize") {
             stage = "models";
+            // `autoproject/0.160.0 (...)`: the name we sent, then Codex's own version.
+            version = /^\S+\/(\d[\w.+-]*)/.exec(String(message.result?.userAgent ?? ""))?.[1];
             send({ method: "initialized" });
             send({ id: ++id, method: "model/list", params: { limit: 100, includeHidden: false } });
           } else {
@@ -107,7 +114,7 @@ export function parseClaudeModels(rows: ModelInfo[]): ModelChoice[] {
   });
 }
 
-export async function discoverClaude(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelChoice[]> {
+export async function discoverClaude(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<Discovery> {
   const abortController = new AbortController();
   let endInput = () => {};
   // Keep stdin open without ever submitting a user message or starting inference.
@@ -121,7 +128,7 @@ export async function discoverClaude(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      session.supportedModels().then(parseClaudeModels),
+      session.supportedModels().then((rows) => ({ models: parseClaudeModels(rows) })),
       new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new DiscoveryError("timed out")), timeoutMs); }),
     ]);
   } finally {
@@ -154,15 +161,24 @@ export function parseGeminiModels(output: string): ModelChoice[] {
   return [...groups.values()].map(normalizeChoice);
 }
 
-export function discoverGemini(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<ModelChoice[]> {
+function agy(args: string[], timeoutMs: number): Promise<string> {
   const executable = process.env.AUTOPROJECT_AGY_PATH?.trim() || process.env.AUTOPROJECT_GEMINI_PATH?.trim() || "agy";
   return new Promise((resolve, reject) => {
-    execFile(/* turbopackIgnore: true */ executable, ["models"], {
+    execFile(/* turbopackIgnore: true */ executable, args, {
       cwd: os.homedir(), env: process.env, timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: MAX_OUTPUT,
     }, (error, stdout) => error
       ? reject(new DiscoveryError(error.code === "ENOENT" ? "is not installed" : error.killed ? "timed out" : "failed to answer"))
-      : resolve(parseGeminiModels(stdout)));
+      : resolve(stdout));
   });
+}
+
+export async function discoverGemini(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<Discovery> {
+  const [models, version] = await Promise.all([
+    agy(["models"], timeoutMs).then(parseGeminiModels),
+    // Only ever a footnote to the models: never fail the refresh over it.
+    agy(["--version"], timeoutMs).then((out) => /\d[\w.+-]*/.exec(out)?.[0], () => undefined),
+  ]);
+  return { models, version };
 }
 
 const VERSION = /^\d+(?:\.\d+)*$/;
@@ -186,11 +202,15 @@ export function latestPerFamily(models: ModelChoice[]): ModelChoice[] {
   for (const model of models) {
     const parts = model.value.split("-");
     const at = parts.findIndex((part) => VERSION.test(part));
-    // The version keeps its slot: `gpt-6-sol` and `gpt-6.1-sol` are the same
-    // family, but `gpt-sol` and `gpt-terra-2` are not — different shapes name
-    // different things, and guessing costs us a release we should have shown.
-    const family = at < 0 ? model.value : parts.map((part, i) => (i === at ? "*" : part)).join("-");
-    const version = at < 0 ? [] : parts[at].split(".").map(Number);
+    // Codex writes 6.1 as `6.1`, Claude writes 5.5 as `-5-5`, so a version is a
+    // run of numbers, not one part. It also keeps its slot: `gpt-6-sol` and
+    // `gpt-6.1-sol` are the same family, but `gpt-sol` and `gpt-terra-2` are
+    // not — different shapes name different things, and guessing costs us a
+    // release we should have shown.
+    let end = at;
+    while (end >= 0 && end + 1 < parts.length && VERSION.test(parts[end + 1])) end++;
+    const family = at < 0 ? model.value : [...parts.slice(0, at), "*", ...parts.slice(end + 1)].join("-");
+    const version = at < 0 ? [] : parts.slice(at, end + 1).flatMap((part) => part.split(".").map(Number));
     const best = versions.get(family);
     if (best && !newer(version, best)) continue;
     versions.set(family, version);
@@ -199,8 +219,11 @@ export function latestPerFamily(models: ModelChoice[]): ModelChoice[] {
   return [...latest.values()];
 }
 
-const newest = (discover: () => Promise<ModelChoice[]>) => () => discover().then(latestPerFamily);
+const newest = (discover: () => Promise<Discovery>) => async (): Promise<Discovery> => {
+  const found = await discover();
+  return { ...found, models: latestPerFamily(found.models) };
+};
 
-export const discoverers: Record<ModelProvider, () => Promise<ModelChoice[]>> = {
+export const discoverers: Record<ModelProvider, () => Promise<Discovery>> = {
   codex: newest(discoverCodex), claude: newest(discoverClaude), gemini: newest(discoverGemini),
 };

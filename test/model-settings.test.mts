@@ -21,7 +21,7 @@ test("Settings, config validation, sessions and execution share discovered metad
     { value: "gemini-new-high", label: "Gemini New", provider: "gemini", reasoningEfforts: ["low", "high"], reasoningModels: { low: "gemini-new-low", high: "gemini-new-high" } },
     { value: "gpt-unknown", label: "Unknown", provider: "codex", reasoningEfforts: [] },
   ];
-  const cache = createModelCatalog({ file: () => path.join(home, "catalog.json"), discover: async (p) => rows.filter((m) => m.provider === p) });
+  const cache = createModelCatalog({ file: () => path.join(home, "catalog.json"), discover: async (p) => ({ models: rows.filter((m) => m.provider === p) }) });
   const snapshot = await cache.refresh();
   let reads = 0;
   let refreshes = 0;
@@ -77,7 +77,7 @@ test("an explicit CLI default clears the saved level, while an omitted level sur
     { value: "gpt-lite", label: "Lite", provider: "codex", reasoningEfforts: ["low", "medium"] },
     { value: "gpt-full", label: "Full", provider: "codex", reasoningEfforts: ["low", "high"] },
   ];
-  const cache = createModelCatalog({ file: () => path.join(home, "catalog.json"), discover: async (p) => rows.filter((m) => m.provider === p) });
+  const cache = createModelCatalog({ file: () => path.join(home, "catalog.json"), discover: async (p) => ({ models: rows.filter((m) => m.provider === p) }) });
   const snapshot = await cache.refresh();
   t.mock.method(modelCatalog, "read", () => snapshot);
   const { GET, PUT } = await import("../app/api/config/route.ts");

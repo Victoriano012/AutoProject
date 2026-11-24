@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 function catalogResponse(catalog: ModelCatalog) {
   return Response.json({
     models: withSelectedModel(catalogModels(catalog), selectedModel(), knownModels(catalog)),
-    providers: Object.fromEntries(Object.entries(catalog.providers).map(([provider, { source, error, lastSuccessAt }]) => [provider, { source, error, lastSuccessAt }])),
+    providers: Object.fromEntries(Object.entries(catalog.providers).map(([provider, { source, error, lastSuccessAt, version }]) => [provider, { source, error, lastSuccessAt, version }])),
     checkedAt: catalog.checkedAt,
   }, { headers: { "Cache-Control": "no-store" } });
 }

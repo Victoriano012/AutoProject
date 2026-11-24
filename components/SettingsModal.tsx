@@ -20,7 +20,7 @@ import StatsModal from "./StatsModal";
 
 type CatalogResponse = {
   models: ModelChoice[];
-  providers: Record<ModelProvider, { source: string; error?: string; lastSuccessAt?: number }>;
+  providers: Record<ModelProvider, { source: string; error?: string; lastSuccessAt?: number; version?: string }>;
 };
 
 async function fetchCatalog(force: boolean, signal?: AbortSignal): Promise<CatalogResponse> {
@@ -29,11 +29,21 @@ async function fetchCatalog(force: boolean, signal?: AbortSignal): Promise<Catal
   return response.json();
 }
 
-const PROVIDERS: { value: ModelProvider; label: string }[] = [
-  { value: "claude", label: "Claude" },
-  { value: "codex", label: "Codex" },
-  { value: "gemini", label: "Gemini" },
+const PROVIDERS: { value: ModelProvider; label: string; tool: string }[] = [
+  { value: "claude", label: "Claude", tool: "Claude" },
+  { value: "codex", label: "Codex", tool: "Codex" },
+  { value: "gemini", label: "Gemini", tool: "Antigravity" },
 ];
+
+/** A provider only offers models to tools it considers current, so the list is
+ * as new as the tool that fetched it and no newer. That version is the one
+ * thing here the person cannot see anywhere else. */
+function catalogTools(result: CatalogResponse): string {
+  return PROVIDERS.flatMap((p) => {
+    const version = result.providers[p.value]?.version;
+    return version ? [`${p.tool} ${version}`] : [];
+  }).join(" \u00b7 ");
+}
 
 /** App-wide settings, plus the open project's own fields. Add future settings
  * as more labeled rows below. */
@@ -55,6 +65,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [catalog, setCatalog] = useState<readonly ModelChoice[]>(MODEL_CHOICES);
   const [refreshing, setRefreshing] = useState(false);
   const [catalogMessage, setCatalogMessage] = useState<string[]>([]);
+  const [tools, setTools] = useState("");
   const choices = withSelectedModel(catalog, model);
   const reasoningLevels = reasoningEffortsForModel(model, choices);
   const effectiveEffort = resolveReasoningEffort(model, reasoningEffort, choices);
@@ -82,6 +93,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
       // so re-appending here would re-wrap its label on every refresh.
       setCatalog(result.models);
       setCatalogMessage(catalogStatus(result));
+      setTools(catalogTools(result));
     } catch (err) {
       setCatalogMessage([err instanceof Error ? err.message : "Could not refresh models."]);
     } finally { setRefreshing(false); }
@@ -111,6 +123,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
         if (stored.signal.aborted) return;
         setCatalog(result.models);
         setCatalogMessage(catalogStatus(result));
+        setTools(catalogTools(result));
       })
       .catch(() => { if (!stored.signal.aborted) setCatalogMessage(["Could not load models. Using bundled defaults."]); });
     return () => { controller.abort(); stored.abort(); };
@@ -201,6 +214,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
             {catalogMessage.length > 0 && (
               <p role="status" className="mt-2 text-xs text-red-600">{catalogMessage.join(" ")}</p>
             )}
+            {tools && <p className="mt-2 text-xs text-zinc-500">{tools}</p>}
           </div>
           <div>
             <div className="flex items-center justify-between gap-2">

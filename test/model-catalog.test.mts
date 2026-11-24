@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { createModelCatalog, catalogModels, knownModels } from "../lib/server/model-catalog.ts";
 import { DiscoveryError } from "../lib/server/discovery-error.ts";
-import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, latestPerFamily } from "../lib/server/model-discovery.ts";
+import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, latestPerFamily, type Discovery } from "../lib/server/model-discovery.ts";
 import { MODEL_CHOICES, normalizeModelLabel, providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
 
 function setEnv(t: test.TestContext, key: string, value: string) {
@@ -67,6 +67,17 @@ test("only the newest release of each family is offered, and a hidden one stays 
     { value: "haiku", displayName: "Haiku", description: "" },
   ]);
   assert.deepEqual(latestPerFamily(claude).map((m) => m.value), ["opus", "sonnet", "haiku"]);
+  // Claude spells 5.5 as `-5-5`. Read as separate parts, every release becomes
+  // its own family and the entire back catalogue stays on the list.
+  const resolved = parseClaudeModels([
+    { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus", description: "Opus 5.5 \u00b7 x" },
+    { value: "a", resolvedModel: "claude-opus-5", displayName: "Opus", description: "Opus 5 \u00b7 x" },
+    { value: "b", resolvedModel: "claude-opus-4-8", displayName: "Opus", description: "Opus 4.8 \u00b7 x" },
+    { value: "c", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku", description: "Haiku 4.5 \u00b7 x" },
+    { value: "d", resolvedModel: "claude-haiku-5-5", displayName: "Haiku", description: "Haiku 5.5 \u00b7 x" },
+  ] as never);
+  assert.deepEqual(latestPerFamily(resolved).map((m) => [m.value, m.label]),
+    [["claude-opus-5-5", "Opus 5.5"], ["claude-haiku-5-5", "Haiku 5.5"]]);
   // A superseded model someone already picked must remain visible and routable.
   const listed = withSelectedModel(latestPerFamily(codex), "gpt-5.6-sol", codex);
   assert.deepEqual(listed.at(-1), { value: "gpt-5.6-sol", label: "Sol 5.6 (saved selection)", provider: "codex", reasoningEfforts: [], defaultReasoningEffort: undefined });
@@ -87,10 +98,10 @@ test("reads never discover, refreshes always do and coalesce, and partial succes
   let now = 1000;
   let calls = 0;
   let fail = false;
-  const discover = async (provider: string): Promise<ModelChoice[]> => {
+  const discover = async (provider: string): Promise<Discovery> => {
     calls++;
     if (provider !== "codex" || fail) throw new Error("private diagnostic must not escape");
-    return [sol];
+    return { models: [sol], version: "0.172.0" };
   };
   const cache = createModelCatalog({ file, now: () => now, discover });
   // Opening Settings reads; a read must never spawn a CLI, at any cache age.
@@ -100,6 +111,7 @@ test("reads never discover, refreshes always do and coalesce, and partial succes
   assert.deepEqual(first, duplicate);
   assert.equal(calls, 3, "concurrent refreshes share one attempt");
   assert.equal(first.providers.codex.source, "discovered");
+  assert.equal(first.providers.codex.version, "0.172.0");
   assert.equal(first.providers.claude.source, "bundled");
   assert.equal(JSON.stringify(first).includes("private diagnostic"), false);
   // However fresh the catalog, a read is free and a refresh still discovers.
@@ -113,6 +125,8 @@ test("reads never discover, refreshes always do and coalesce, and partial succes
   assert.equal(calls, 9);
   assert.equal(stale.providers.codex.source, "cached");
   assert.deepEqual(stale.providers.codex.models, [sol]);
+  // The list is still the one 0.172.0 fetched, so it still says so.
+  assert.equal(stale.providers.codex.version, "0.172.0");
   const restarted = createModelCatalog({ file, now: () => now, discover });
   assert.deepEqual(restarted.read().providers.codex.models, [sol]);
   assert.equal(calls, 9, "disk snapshots survive restart without discovering");
@@ -125,7 +139,7 @@ test("removed saved selections remain visible and retain routing without changin
   let choices = [alias];
   const cache = createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover: async (p) => {
     if (p !== "claude") throw new Error("offline");
-    return choices;
+    return { models: choices };
   } });
   await cache.refresh();
   choices = [{ ...alias, value: "next-sonnet" }];
@@ -144,7 +158,7 @@ test("corrupt disk cache falls back, while a successful catalog can override bun
   fs.writeFileSync(file(), '{"version":1,"providers":null}');
   const cache = createModelCatalog({ file, discover: async (p) => {
     if (p !== "codex") throw new Error("offline");
-    return [{ value: "gpt-6-astra", label: "Astra", provider: "codex", reasoningEfforts: [] }];
+    return { models: [{ value: "gpt-6-astra", label: "Astra", provider: "codex", reasoningEfforts: [] }] };
   } });
   assert.ok(catalogModels(cache.read()).length);
   const result = await cache.refresh();
@@ -161,16 +175,41 @@ const readline = require('node:readline');
 readline.createInterface({ input: process.stdin }).on('line', line => {
   fs.appendFileSync(${JSON.stringify(log)}, line + '\\n');
   const req = JSON.parse(line);
-  if (req.method === 'initialize') console.log(JSON.stringify({id:req.id,result:{}}));
+  if (req.method === 'initialize') console.log(JSON.stringify({id:req.id,result:{userAgent:'autoproject/0.172.0 (Mac OS 26.6.0; arm64)'}}));
   if (req.method === 'model/list') console.log(JSON.stringify({ id:req.id,result:{data:[{model:req.params.cursor ? 'gpt-next' : 'gpt-6.1-sol', supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:req.params.cursor ? null : 'page2'}}));
 });
 `, { mode: 0o700 });
   setEnv(t, "AUTOPROJECT_CODEX_PATH", executable);
-  const models = await discoverCodex(2000);
+  const { models, version } = await discoverCodex(2000);
   assert.deepEqual(models.map((m) => m.value), ["gpt-6.1-sol", "gpt-next"]);
+  // Codex only offers its newest models to a recent enough CLI, so the version
+  // that answered is the difference between "nothing new" and "nothing newer".
+  assert.equal(version, "0.172.0");
   const messages = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(messages.map((m) => m.method), ["initialize", "initialized", "model/list", "model/list"]);
   assert.equal(messages[3].params.cursor, "page2");
+});
+
+test("Gemini discovery reports the agy that answered, and survives it not saying", async (t) => {
+  const dir = fixture(t);
+  const executable = path.join(dir, "agy");
+  fs.writeFileSync(executable, `#!/usr/bin/env node
+if (process.argv[2] === '--version') { console.log('1.5.16'); process.exit(0); }
+console.log('Fetching available models...');
+console.log('gemini-4-pro-high\tGemini 4 Pro (High)');
+`, { mode: 0o700 });
+  setEnv(t, "AUTOPROJECT_AGY_PATH", executable);
+  const found = await discoverGemini(5000);
+  assert.deepEqual(found.models.map((m) => m.value), ["gemini-4-pro-high"]);
+  assert.equal(found.version, "1.5.16");
+  // A tool that will not name itself still gets its models listed.
+  fs.writeFileSync(executable, `#!/usr/bin/env node
+if (process.argv[2] === '--version') process.exit(1);
+console.log('gemini-4-pro-high\tGemini 4 Pro (High)');
+`, { mode: 0o700 });
+  const quiet = await discoverGemini(5000);
+  assert.deepEqual(quiet.models.map((m) => m.value), ["gemini-4-pro-high"]);
+  assert.equal(quiet.version, undefined);
 });
 
 test("CLI discovery is bounded and rejects missing tools and malformed responses", async (t) => {
@@ -196,7 +235,7 @@ test("an unwritable cache preserves successful discovery in memory", async (t) =
   let fail = false;
   const cache = createModelCatalog({ file: () => path.join(parent, "catalog.json"), discover: async (p) => {
     if (p !== "codex" || fail) throw new Error("offline");
-    return [sol];
+    return { models: [sol] };
   } });
   await cache.refresh();
   fail = true;
@@ -269,15 +308,15 @@ const AGY_OUTPUT = [
 test("a newly released model reaches the list Settings renders, for every provider", async (t) => {
   const dir = fixture(t);
   let released = false;
-  const discover = async (provider: string): Promise<ModelChoice[]> => {
-    if (provider === "codex") return latestPerFamily(parseCodexModels(
-      released ? [{ model: "gpt-7-nova", displayName: "GPT-7-Nova", hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "high" }], defaultReasoningEffort: "high" }, ...CODEX_ROWS] : CODEX_ROWS));
-    if (provider === "claude") return latestPerFamily(parseClaudeModels(CLAUDE_ROWS.map((row) =>
+  const discover = async (provider: string): Promise<Discovery> => {
+    if (provider === "codex") return { models: latestPerFamily(parseCodexModels(
+      released ? [{ model: "gpt-7-nova", displayName: "GPT-7-Nova", hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "high" }], defaultReasoningEffort: "high" }, ...CODEX_ROWS] : CODEX_ROWS)) };
+    if (provider === "claude") return { models: latestPerFamily(parseClaudeModels(CLAUDE_ROWS.map((row) =>
       // The alias "opus" is unchanged by the release; what it resolves to is not.
       released && row.value === "opus"
         ? { ...row, resolvedModel: "claude-opus-6", description: "Opus 6 \u00b7 Best for everyday, complex tasks" }
-        : row) as never));
-    return latestPerFamily(parseGeminiModels(AGY_OUTPUT + (released ? "gemini-4-pro-high\tGemini 4 Pro (High)\ngemini-4-pro-low\tGemini 4 Pro (Low)\n" : "")));
+        : row) as never)) };
+    return { models: latestPerFamily(parseGeminiModels(AGY_OUTPUT + (released ? "gemini-4-pro-high\tGemini 4 Pro (High)\ngemini-4-pro-low\tGemini 4 Pro (Low)\n" : ""))) };
   };
   const cache = createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover });
   const shown = async () => {
@@ -309,7 +348,7 @@ test("a provider that fails says which one and why, without leaking the raw erro
   let fail: Record<string, () => never> = {};
   const cache = createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover: async (p) => {
     fail[p]?.();
-    return p === "codex" ? [sol] : [];
+    return { models: p === "codex" ? [sol] : [] };
   } });
   // Every provider fails a different way, and each reason names the cause.
   fail = {
@@ -346,10 +385,10 @@ test("a release the version rule cannot order is still offered, and one bad row 
   assert.equal(normalizeModelLabel("(default)"), "(default)");
   // An unusable row is dropped by itself; the release beside it still arrives.
   const dir = fixture(t);
-  const cache = createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover: async (p) => p === "codex"
+  const cache = createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover: async (p) => ({ models: p === "codex"
     ? [{ value: "gpt-7-nova", label: "Nova 7", provider: "codex", reasoningEfforts: ["high"] },
       { value: "gpt-7-junk", label: "x".repeat(2000), provider: "codex", reasoningEfforts: ["high"] }]
-    : [] });
+    : [] }) });
   const catalog = await cache.refresh();
   assert.deepEqual(catalog.providers.codex.models.map((m) => m.value), ["gpt-7-nova"]);
   assert.equal(catalog.providers.codex.error, undefined);
