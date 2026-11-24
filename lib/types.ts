@@ -27,6 +27,10 @@ export interface AgentRequest {
   heard?: boolean;
   /** Why the turn failed; set with `state: "error"` only. */
   error?: string;
+  /** Set when an update's restart cut this request's turn short, so the next
+   * server takes it up again as said: what the agent is told then, or empty
+   * when it had not started on it and is told the request itself. */
+  resume?: string;
 }
 
 /** A subagent the project agent has working for it right now (act mode), from
@@ -157,6 +161,9 @@ export interface Project {
   /** Durable requests restored after the server restarts. */
   pendingFeedback?: Record<string, string>;
   agentRequests?: AgentRequest[];
+  /** Ticket sessions an update's restart cut short, by ticket id: the next
+   * server sends `prompt` in `sessionId` to carry each on (see restart.ts). */
+  resumes?: Record<string, { prompt: string; sessionId?: string; feedback?: boolean }>;
 }
 
 export const defaultProject = (name: string, workspaceDir = ""): Project => ({

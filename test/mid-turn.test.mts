@@ -138,8 +138,8 @@ test("Gemini: a message mid-turn cuts the step at work and the conversation goes
 for (const [provider, model] of [["Codex", "gpt-6-astra"], ["Gemini", "gemini-3.7-flash-high"]] as const) {
   test(`${provider}: Stop still stops the turn, and says so`, async (t) => {
     const dir = project(t, model);
-    if (provider === "Codex") fakeCodex(t, `tool("sleep 60");`);
-    else fakeAgy(t);
+    const codex = provider === "Codex" ? fakeCodex(t, `tool("sleep 60");`) : undefined;
+    if (!codex) fakeAgy(t);
 
     const req = sendToAgent(dir, "act", "Run sleep 60")!;
     await until(() => chat(dir).some(([kind]) => kind === "tool"), "the turn never started its command");
@@ -151,5 +151,8 @@ for (const [provider, model] of [["Codex", "gpt-6-astra"], ["Gemini", "gemini-3.
     assert.deepEqual(runState(dir).agent.requests.map((r) => [r.id, r.state]), [[req.id, "stopped"]]);
     // Over: a message now waits for its own turn.
     assert.equal(registry.inputs.has(dir), false);
+    // Codex is asked to stop the turn, which ends its commands with it; a
+    // killed app-server would leave them running.
+    if (codex) assert.deepEqual(codex().at(-1), { interrupted: "turn-1" });
   });
 }

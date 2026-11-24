@@ -11,7 +11,7 @@ import {
 } from "../types";
 import { streamAgent } from "./agent";
 import { runLimiter } from "./run-limiter";
-import { holdingForRestart } from "./restart";
+import { holdingForRestart, restartNote, suspended } from "./restart";
 import { addTicketsToBoard, boardServer, parsePlannedTickets, REQUEST_SCHEMA } from "./board-tools";
 import * as store from "./project-store";
 import { ensureLoaded, notifyAgent, registry } from "./runs";
@@ -139,6 +139,7 @@ export function sendToAgent(dir: string, mode: Mode, message: string): AgentRequ
   if (!ensureLoaded(dir)) throw new Error(`No project at ${dir}`);
   if (
     mode === "act" &&
+    !holdingForRestart() &&
     registry.agentMode.get(dir) === "act" &&
     registry.inputs.get(dir)?.(message)
   ) {
@@ -188,28 +189,42 @@ async function pumpOnce(dir: string): Promise<void> {
   const model = selectedModel();
   let releaseCapacity: (() => void) | undefined;
   let error: string | null = null;
+  // A turn a restart cut short is taken up again as said: the transcript has
+  // the words already, and an agent at work is told to carry on instead.
+  const resume = req.resume;
+  delete req.resume;
+  let said = resume !== undefined;
+  let live = false;
   try {
     await store.flush(dir);
     releaseCapacity = await runLimiter.acquire(providerForModel(model), ctrl.signal);
     ctrl.signal.throwIfAborted();
-    say(dir, req.mode, { kind: "user", text: req.text });
+    if (!said) say(dir, req.mode, { kind: "user", text: req.text });
+    said = true;
     // Said at last: the transcript carries the words now, so the chat view
     // stops drawing its own pending bubble for them and nothing shows twice.
     req.heard = true;
     notifyAgent(dir);
-    error = await turn(dir, req.mode, req.text, ctrl.signal, model);
+    error = await turn(dir, req.mode, req.text, ctrl.signal, model, resume || undefined, () => { live = true; });
   } catch (err) {
     error = String(err);
   } finally {
     releaseCapacity?.();
+    const subagents = registry.subagents.get(dir) ?? [];
     registry.agents.delete(dir);
     registry.agentMode.delete(dir);
     registry.subagents.delete(dir);
     // Only a turn that finished leaves the stack. A failed one stays with its
     // error, a stopped one stays as it was sent: a stop halts the work, it
     // never throws the person's words away — they retry it or take it back
-    // into the box from the row's ✕.
-    if (ctrl.signal.aborted) {
+    // into the box from the row's ✕. One a restart cut short waits for the
+    // next server, which carries it on.
+    if (suspended(ctrl.signal)) {
+      req.state = "queued";
+      req.resume = live
+        ? restartNote(subagents.map((s) => (s.type ? `${s.description} (${s.type})` : s.description)))
+        : resume ?? (said ? "" : undefined);
+    } else if (ctrl.signal.aborted) {
       req.state = "stopped";
       delete req.error;
     } else if (error !== null) {
@@ -296,6 +311,9 @@ async function turn(
   message: string,
   signal: AbortSignal,
   model: string,
+  /** Said instead of the message, to carry on a turn a restart cut short. */
+  resume: string | undefined,
+  onLive: () => void,
 ): Promise<string | null> {
   const provider = providerForModel(model);
   // Codex and Gemini have no in-process MCP: their panel turn answers with
@@ -305,7 +323,7 @@ async function turn(
   const attempt = async (fresh: boolean): Promise<string | null | "retry"> => {
     const project = store.getProject(dir)!;
     const prompt =
-      (mode === "panel" ? panelPreamble : actPreamble)(project, message) +
+      (resume && !fresh ? resume : (mode === "panel" ? panelPreamble : actPreamble)(project, message)) +
       (fallback
         ? `\n\nYou have no board tools here: answer with the JSON object of tickets instead.`
         : "");
@@ -334,6 +352,7 @@ async function turn(
         if (ev.type === "input") {
           registry.inputs.set(dir, ev.push);
         } else if (ev.type === "init") {
+          onLive();
           store.setAgentSession(dir, ev.sessionId);
         } else if (ev.type === "text" || ev.type === "tool") {
           produced = true;
@@ -345,7 +364,8 @@ async function turn(
             { id: ev.id, description: ev.description, type: ev.agentType },
           ]);
           notifyAgent(dir);
-        } else if (ev.type === "subagent-end") {
+        } else if (ev.type === "subagent-end" && !suspended(signal)) {
+          // Those a restart stops stay listed: the next server names them.
           const live = registry.subagents.get(dir) ?? [];
           if (live.some((s) => s.id === ev.id)) {
             registry.subagents.set(dir, live.filter((s) => s.id !== ev.id));
@@ -366,7 +386,7 @@ async function turn(
     }
     registry.inputs.delete(dir);
     if (signal.aborted) {
-      say(dir, mode, { kind: "info", text: "Stopped by user" });
+      if (!suspended(signal)) say(dir, mode, { kind: "info", text: "Stopped by user" });
       return null;
     }
     if (failed === null) return null;

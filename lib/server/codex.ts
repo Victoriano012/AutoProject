@@ -117,7 +117,11 @@ export async function* streamCodexAgent(req: AgentRequest): AsyncGenerator<Agent
 }
 
 async function* runCodex(req: AgentRequest): AsyncGenerator<AgentEvent> {
-  const cli = await createCliSession(req, {
+  // A stop goes through Codex (turn/interrupt), which ends the commands its
+  // turns run: a killed app-server would leave them running in the workspace.
+  // The process itself is killed only if it does not wind down.
+  const kill = new AbortController();
+  const cli = await createCliSession({ ...req, signal: kill.signal }, {
     label: "Codex",
     executable: process.env.AUTOPROJECT_CODEX_PATH?.trim() || "codex",
     args: () => ["app-server"],
@@ -157,6 +161,14 @@ async function* runCodex(req: AgentRequest): AsyncGenerator<AgentEvent> {
   let tokens = 0;
   let resultSent = false;
   const seenTools = new Set<string>();
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const stop = () => {
+    closed = true;
+    for (const turnId of open) call("turn/interrupt", { threadId, turnId });
+    killTimer = setTimeout(() => kill.abort(), 3000);
+  };
+  req.signal.addEventListener("abort", stop, { once: true });
+  if (req.signal.aborted) stop();
 
   try {
     for await (const raw of cli.events) {
@@ -235,6 +247,8 @@ async function* runCodex(req: AgentRequest): AsyncGenerator<AgentEvent> {
     }
   } finally {
     closed = true;
+    req.signal.removeEventListener("abort", stop);
+    clearTimeout(killTimer);
     await cli.close();
   }
 }

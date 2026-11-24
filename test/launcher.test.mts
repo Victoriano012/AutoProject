@@ -107,7 +107,7 @@ test("launcher --restart asks the running server and reports whether the update 
     assert.match(failed.stderr, /failed to build; the running server keeps serving/);
     const built = restart('{"phase":"waiting"}');
     assert.equal(built.status, 0, built.stderr);
-    assert.match(built.stdout, /restarts once no agent is working/);
+    assert.match(built.stdout, /restarting on it; agents at work carry on after the restart/);
     assert.equal(existsSync(trace), false);
   });
 });

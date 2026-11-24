@@ -11,7 +11,7 @@ Starts a production build on 127.0.0.1:4123, or reuses a server already there.
   --port      Override AUTOPROJECT_PORT (default 4123).
   --no-open   Print the URL without opening a browser.
   --restart   Have the running server rebuild from this checkout and restart
-              once no agent is working. Returns when the build is done.
+              on it; agents at work carry on after it. Returns when built.
   --replace PID  Used by that restart: stop PID, then serve the build already
               in AUTOPROJECT_DIST_DIR.
 
@@ -70,7 +70,7 @@ if [ "$launch_restart" = true ]; then
     launch_status="$(curl --fail --silent "$launch_url/api/restart")" || launch_status=
   done
   [[ "$launch_status" != *'"phase":"failed"'* ]] || fail "The update failed to build; the running server keeps serving. Output: $launch_log"
-  printf 'Update built. AutoProject restarts once no agent is working.\n'
+  printf 'Update built. AutoProject is restarting on it; agents at work carry on after the restart.\n'
   exit 0
 fi
 

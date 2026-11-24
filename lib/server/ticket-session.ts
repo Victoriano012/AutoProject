@@ -7,6 +7,7 @@ import * as store from "./project-store";
 import { registry, ticketKey } from "./run-registry";
 import { runLimiter } from "./run-limiter";
 import { notifyRuns } from "./runs";
+import { restartNote, suspended } from "./restart";
 
 // ---- notes the person adds to a card in flight ----------------------------
 
@@ -48,20 +49,30 @@ const workerOf = (dir: string, id: string): Worker | undefined => {
  * tokens and cost come from the result message, and a run whose provider gave
  * no cost is counted in `runsWithoutCost` instead of being priced from a table.
  */
-function recordRun(dir: string, ticketId: string, ms: number, usage?: RunUsage): void {
+function recordRun(dir: string, ticketId: string, ms: number, usage?: RunUsage, runs = 1): void {
   store.updateTicket(dir, ticketId, (t) => ({
     ...t,
     stats: addStats(t.stats, {
-      runs: 1,
+      runs,
       ms,
       tokens: usage?.tokens ?? 0,
       costUsd: usage?.costUsd ?? 0,
-      runsWithoutCost: usage?.costUsd === undefined ? 1 : 0,
+      runsWithoutCost: usage?.costUsd === undefined ? runs : 0,
     }),
   }));
 }
 
 // ---- one agent session ----------------------------------------------------
+
+export interface SessionOutcome {
+  ok: boolean;
+  text: string;
+  aborted: boolean;
+  /** Set when a restart cut the session short: what to send, in which
+   * conversation, to carry it on (the restart note once the agent was at
+   * work, else what it was about to be sent). */
+  suspended?: { prompt: string; sessionId?: string };
+}
 
 /** Each CLI's answer to resuming a conversation it no longer has: Claude Code's,
  * Codex's, and the one gemini.ts gives for agy, which silently starts anew. */
@@ -86,7 +97,7 @@ async function runAgentSession(
     /** What a new conversation is told if `sessionId` turns out to be gone. */
     freshPrompt?: () => string;
   }
-): Promise<{ ok: boolean; text: string; aborted: boolean }> {
+): Promise<SessionOutcome> {
   const key = ticketKey(dir, ticketId);
   const ctrl = new AbortController();
   registry.controllers.set(key, ctrl);
@@ -98,6 +109,8 @@ async function runAgentSession(
   let usage: RunUsage | undefined;
   let started: number | undefined;
   let errorLogged = false;
+  // The conversation this session reached, once the agent is at work in it.
+  let live: string | undefined;
 
   try {
     await store.flush(dir);
@@ -118,6 +131,7 @@ async function runAgentSession(
       });
       for await (const ev of events) {
         if (ev.type === "init") {
+          live = ev.sessionId;
           store.updateTicket(dir, ticketId, (t) => ({ ...t, sessionId: ev.sessionId }));
           // The worker's conversation is what its next ticket resumes — unless
           // this is feedback on a ticket from a conversation it has moved on from.
@@ -166,7 +180,9 @@ async function runAgentSession(
       sessionId = undefined;
       finalText = "";
     }
-    if (ctrl.signal.aborted) {
+    if (suspended(ctrl.signal)) {
+      ok = false;
+    } else if (ctrl.signal.aborted) {
       ok = false;
       finalText = "Stopped by user";
       store.appendLog(dir, ticketId, { kind: "info", text: abortText(key), ts: Date.now() });
@@ -183,7 +199,7 @@ async function runAgentSession(
     ok = false;
     // A user stop is not a failure: log it as info, not error.
     finalText = ctrl.signal.aborted ? "Stopped by user" : String(err);
-    store.appendLog(dir, ticketId, {
+    if (!suspended(ctrl.signal)) store.appendLog(dir, ticketId, {
       kind: ctrl.signal.aborted ? "info" : "error",
       text: ctrl.signal.aborted ? abortText(key) : finalText,
       ts: Date.now(),
@@ -191,11 +207,19 @@ async function runAgentSession(
   } finally {
     releaseCapacity?.();
     registry.controllers.delete(key);
-    // A stopped or failed session still spent the time and the tokens it spent.
-    if (started !== undefined) recordRun(dir, ticketId, Date.now() - started, usage);
+    // A stopped or failed session still spent the time and the tokens it spent;
+    // one a restart cut short counts as a run once, when it is carried on.
+    if (started !== undefined) recordRun(dir, ticketId, Date.now() - started, usage, suspended(ctrl.signal) ? 0 : 1);
     notifyRuns(dir);
   }
-  return { ok, text: finalText, aborted: ctrl.signal.aborted };
+  return {
+    ok,
+    text: finalText,
+    aborted: ctrl.signal.aborted,
+    ...(suspended(ctrl.signal) && {
+      suspended: live ? { prompt: restartNote(), sessionId: live } : { prompt: body.prompt, sessionId: body.sessionId },
+    }),
+  };
 }
 
 /**
@@ -204,7 +228,8 @@ async function runAgentSession(
  * `noteTicket`); this resumes that same session with what they said, so
  * everything the agent had already done stays in its context, the ticket keeps
  * its "running" status throughout — the card never leaves Working — and there
- * is never a second agent in one workspace. Normally exactly one pass.
+ * is never a second agent in one workspace. Normally exactly one pass. A
+ * session a restart cut short ends it: the next server carries that on.
  */
 export async function runWithNotes(
   dir: string,
@@ -216,10 +241,11 @@ export async function runWithNotes(
     model: string;
     freshPrompt?: () => string;
   }
-): Promise<{ ok: boolean; text: string; aborted: boolean }> {
+): Promise<SessionOutcome> {
   const key = ticketKey(dir, ticketId);
   for (;;) {
     const outcome = await runAgentSession(dir, ticketId, body);
+    if (outcome.suspended) return outcome;
     const notes = takeNotes(key);
     if (notes.length === 0 || registry.userStopped.has(key)) return outcome;
     const resumed = resumableSession(ticketOf(dir, ticketId)?.sessionId, body.model)?.stored;

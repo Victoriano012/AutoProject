@@ -10,6 +10,6 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 # Putting a change live
 
-AutoProject is served from this checkout on 127.0.0.1:4123. After committing a change that should go live, run `bin/autoproject --restart`: it builds beside the running app, waits until no agent is working (yours included, so end your turn), then swaps servers. A failed build leaves the old server running and the command says so.
+AutoProject is served from this checkout on 127.0.0.1:4123. After committing a change that should go live, run `bin/autoproject --restart`: it builds beside the running app, then swaps servers at once. Agents at work, you included, are cut short and carry on in the same conversation on the new server, told the update is live; do not run it again then. A failed build leaves the old server running and the command says so.
 
 Never stop or restart the server on 4123 directly. A plain `npm run build` writes `.next`, not the live build, so it is always safe.

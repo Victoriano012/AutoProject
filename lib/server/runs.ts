@@ -15,7 +15,8 @@ import { registry, ticketKey } from "./run-registry";
 export { registry } from "./run-registry";
 import { createBoardIndex } from "../board-index";
 import { inheritedAttachments, startingSession, workerOf, ticketPrompt } from "./ticket-prompt";
-import { runWithNotes } from "./ticket-session";
+import { runWithNotes, type SessionOutcome } from "./ticket-session";
+import { listProjects, readProject } from "../projects-fs";
 import { holdingForRestart } from "./restart";
 export { ticketPrompt } from "./ticket-prompt";
 
@@ -74,7 +75,17 @@ export function ensureLoaded(dir: string): Project | null {
   // A "running" left in project.json by a process that is gone has nothing to
   // abort and nothing that will ever finish it.
   if (project && (cold || !registry.requests.has(dir))) {
-    if (cold) settleZombies(dir);
+    if (cold) {
+      // What the last server's restart cut short carries on — once: taken off
+      // disk now, so a crash from here on is never replayed. Each claims its
+      // ticket at once, so the zombies settled next are the others.
+      if (project.resumes) store.setProject(dir, { ...project, resumes: undefined });
+      for (const [id, resume] of Object.entries(project.resumes ?? {})) {
+        const ticket = project.tickets.find((t) => t.id === id);
+        if (ticket?.status === "running" && !ticket.paused) void resumeTicket(dir, id, resume);
+      }
+      settleZombies(dir);
+    }
     for (const [id, message] of Object.entries(project.pendingFeedback ?? {})) {
       registry.pendingFeedback.set(ticketKey(dir, id), message);
     }
@@ -98,8 +109,52 @@ export function ensureLoaded(dir: string): Project | null {
   return store.getProject(dir);
 }
 
+/** On a server's start: carry on what the last one's restart cut short. */
+export function resumeAfterRestart(): void {
+  for (const { id } of listProjects()) {
+    const project = readProject(id);
+    if (project?.resumes || project?.agentRequests?.some((r) => r.resume !== undefined)) ensureLoaded(id);
+  }
+}
+
 const ticketOf = (dir: string, id: string): Ticket | undefined =>
   store.getProject(dir)?.tickets.find((t) => t.id === id);
+
+/** Settle a ticket's session: review, or error, or back where it was when the
+ * person stopped it (feedback: the work before it still awaits review). One a
+ * restart cut short stays running, saved for the next server to carry on. */
+function settleRun(dir: string, ticketId: string, outcome: SessionOutcome, feedback = false): void {
+  if (outcome.suspended) {
+    const project = store.getProject(dir);
+    const resume = { ...outcome.suspended, ...(feedback && { feedback }) };
+    if (project) store.setProject(dir, { ...project, resumes: { ...project.resumes, [ticketId]: resume } });
+    return;
+  }
+  const { ok, text, aborted } = outcome;
+  // The person's stop and the settled status land in one write: a card that
+  // went back to todo because they stopped it must never be seen as Queued.
+  const stopped = registry.userStopped.has(ticketKey(dir, ticketId));
+  // Skip the final write if something else already moved the ticket out of
+  // "running" (e.g. a rejection reset it to todo while aborting).
+  // A user stop is not a failure: "error" stays reserved for runs where the
+  // agent actually failed.
+  store.updateTicket(dir, ticketId, (t) =>
+    t.status !== "running"
+      ? t
+      : aborted
+        ? feedback ? { ...t, status: "review" } : { ...t, status: "todo", ...(stopped ? { paused: true } : {}) }
+        : { ...t, status: ok ? "review" : "error", resultSummary: text.length > 1500 ? text.slice(0, 1500) + "…" : text }
+  );
+}
+
+/** Carry on a ticket session the last server's restart cut short, in its own
+ * conversation, as the same run: no new prompt, no "Run started". */
+async function resumeTicket(dir: string, ticketId: string, resume: NonNullable<Project["resumes"]>[string]): Promise<void> {
+  await withTicketClaim(dir, ticketId, async () => {
+    const outcome = await runWithNotes(dir, ticketId, { prompt: resume.prompt, sessionId: resume.sessionId, model: selectedModel() });
+    settleRun(dir, ticketId, outcome, resume.feedback);
+  });
+}
 
 /** Persist the stop immediately, even while an abort is winding down, so a
  * crash before process exit cannot turn stopped work into runnable work. */
@@ -140,7 +195,7 @@ async function runTicketOnce(dir: string, ticketId: string): Promise<void> {
       ts: Date.now(),
     });
   }
-  const { ok, text, aborted } = await runWithNotes(dir, ticketId, {
+  const outcome = await runWithNotes(dir, ticketId, {
     prompt,
     // The worker's conversation, so it keeps what its earlier tickets taught it.
     sessionId: resumableSession(session, model)?.stored,
@@ -149,22 +204,7 @@ async function runTicketOnce(dir: string, ticketId: string): Promise<void> {
     attachments: inheritedAttachments(project, ticket),
     model,
   });
-
-  const summary = text.length > 1500 ? text.slice(0, 1500) + "…" : text;
-  // The person's stop and the settled status land in one write: a card that
-  // went back to todo because they stopped it must never be seen as Queued.
-  const stopped = registry.userStopped.has(ticketKey(dir, ticketId));
-  // Skip the final write if something else already moved the ticket out of
-  // "running" (e.g. a rejection reset it to todo while aborting).
-  // A user stop is not a failure: the ticket goes back to todo, and "error"
-  // stays reserved for runs where the agent actually failed.
-  store.updateTicket(dir, ticketId, (t) =>
-    t.status !== "running"
-      ? t
-      : aborted
-        ? { ...t, status: "todo", ...(stopped ? { paused: true } : {}) }
-        : { ...t, status: !ok ? "error" : "review", resultSummary: summary }
-  );
+  settleRun(dir, ticketId, outcome);
 }
 
 /**
@@ -323,7 +363,7 @@ async function sendFeedbackNow(
   }
   store.updateTicket(dir, ticketId, (t) => ({ ...t, status: "running" }));
 
-  const { ok, text, aborted } = await runWithNotes(dir, ticketId, {
+  const outcome = await runWithNotes(dir, ticketId, {
     prompt: opening
       ? `${opening}\n\nThe human is starting this ticket with a request:\n\n${message}`
       : `Human review feedback on your work for this ticket:\n\n${message}\n\nAddress the feedback, then end with a short summary of what you changed.`,
@@ -339,21 +379,11 @@ async function sendFeedbackNow(
   });
 
   // Stopped feedback is not a failure: the earlier work still awaits review.
-  store.updateTicket(dir, ticketId, (t) =>
-    t.status !== "running"
-      ? t
-      : aborted
-        ? { ...t, status: "review" }
-        : {
-            ...t,
-            status: ok ? "review" : "error",
-            resultSummary: text.length > 1500 ? text.slice(0, 1500) + "…" : text,
-          }
-  );
+  settleRun(dir, ticketId, outcome, true);
   // An answered ticket can unblock the rest of the board (its files come free)
   // and nothing else here would notice.
   autoRun(dir);
-  return !ok && !aborted;
+  return !outcome.ok && !outcome.aborted;
 }
 
 /** Reject a ticket in review with feedback (the board's red cross): the

@@ -10,7 +10,9 @@ interface CliOptions {
   executable: string;
   args: (schemaPath?: string) => string[];
   stdin?: string;
-  /** Keep stdin open for `send` (a JSON-RPC CLI); `close` ends it. */
+  /** Keep stdin open for `send` (a JSON-RPC CLI). `close` ends it and lets the
+   * CLI exit by itself, cleaning up after itself (Codex ends the commands it
+   * runs; a signal would leave them running), before any signal. */
   interactive?: boolean;
   /** Production callers use the default; a short interval keeps fake CLI
    * cancellation tests fast without changing application configuration. */
@@ -114,7 +116,10 @@ export async function createCliSession(req: AgentRequest, options: CliOptions) {
     },
     async close() {
       req.signal.removeEventListener("abort", stop);
-      if (!child.stdin.writableEnded) child.stdin.end();
+      if (options.interactive && !child.stdin.writableEnded) {
+        child.stdin.end();
+        await Promise.race([exit, new Promise((resolve) => setTimeout(resolve, 3000).unref())]);
+      }
       stop();
       await exit;
       lines.close();

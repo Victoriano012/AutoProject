@@ -8,8 +8,9 @@ import type { TestContext } from "node:test";
  * it. It answers initialize and the thread request (`open` may answer that
  * otherwise, with `reply` or `fail`), and runs `turn` on each turn/start, with `text` the message, `resumed` the thread asked
  * for, `steering` when a turn is open (the message joins it, as in Codex), and
- * `emit`, `say`, `tool` and `complete` to answer. Returns the messages sent,
- * with the thread each run asked to resume.
+ * `emit`, `say`, `tool` and `complete` to answer; turn/interrupt ends the turn.
+ * Returns what it was sent: each message with the thread its run asked to
+ * resume, and each interrupt.
  */
 export function fakeCodex(t: TestContext, turn: string, open = `reply({ thread: { id: resumed ?? "thread-new" } });`) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "autoproject-fake-codex-"));
@@ -44,6 +45,10 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", (l
     reply({ turn: { id: active } });
     if (!steering) emit("turn/started", { threadId, turn: { id: active } });
     ${turn}
+  } else if (m.method === "turn/interrupt") {
+    fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ interrupted: m.params.turnId }) + "\\n");
+    reply({});
+    complete("interrupted");
   }
 });
 `, { mode: 0o700 });
@@ -55,6 +60,6 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", (l
     fs.rmSync(dir, { recursive: true, force: true });
   });
   return () => fs.existsSync(log)
-    ? fs.readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { resumed?: string; text: string; outputSchema?: unknown })
+    ? fs.readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { resumed?: string; text: string; outputSchema?: unknown; interrupted?: string })
     : [];
 }
