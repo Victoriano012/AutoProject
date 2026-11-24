@@ -1,8 +1,9 @@
 import { spawn, execFile } from "node:child_process";
 import os from "node:os";
 import { query, type ModelInfo, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { claudeExecutable } from "./claude";
 import { DiscoveryError } from "./discovery-error";
-import { normalizeChoice, normalizeModelLabel, REASONING_LABELS, type ModelChoice, type ModelProvider, type ReasoningEffort } from "../models";
+import { newer, normalizeChoice, normalizeModelLabel, REASONING_LABELS, type ModelChoice, type ModelProvider, type ReasoningEffort } from "../models";
 
 export const DISCOVERY_TIMEOUT_MS = 12_000;
 const MAX_OUTPUT = 2 * 1024 * 1024;
@@ -26,11 +27,12 @@ export function parseCodexModels(data: unknown): ModelChoice[] {
   });
 }
 
+const codexPath = () => process.env.AUTOPROJECT_CODEX_PATH?.trim() || "codex";
+
 /** Public app-server RPC only: no thread, turn, prompt, or credential reading. */
 export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<Discovery> {
   return new Promise((resolve, reject) => {
-    const executable = process.env.AUTOPROJECT_CODEX_PATH?.trim() || "codex";
-    const child = spawn(/* turbopackIgnore: true */ executable, ["app-server"], {
+    const child = spawn(/* turbopackIgnore: true */ codexPath(), ["app-server"], {
       cwd: os.homedir(), env: process.env, stdio: ["pipe", "pipe", "pipe"],
     });
     let done = false;
@@ -92,13 +94,14 @@ export function discoverCodex(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<Discove
   });
 }
 
-/** The SDK's displayName is bare ("Opus"); the version sits at the head of the
- * description ("Opus 5.5 · Best for everyday tasks"). Prefer that when it
- * actually names one, so Claude reads like the other two providers. */
+/** The CLI names the version in displayName ("Opus 5.5") or, in older
+ * releases, at the head of the description ("Opus 5.5 · Best for everyday
+ * tasks"). Take whichever reads as family then version, so Claude reads like
+ * the other two providers and free description text never becomes a name. */
 function claudeLabel(row: ModelInfo): string {
-  const head = row.description?.split("\u00b7")[0]?.trim() ?? "";
-  const named = normalizeModelLabel(head);
-  return /\d/.test(named) ? named : row.displayName || row.value;
+  return [row.displayName, row.description?.split("\u00b7")[0]]
+    .map((name) => normalizeModelLabel(name?.trim() ?? ""))
+    .find((name) => /^\S.* \d+(?:\.\d+)*$/.test(name)) ?? (row.displayName || row.value);
 }
 
 export function parseClaudeModels(rows: ModelInfo[]): ModelChoice[] {
@@ -123,12 +126,12 @@ export async function discoverClaude(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<
   }
   const session = query({ prompt: input(), options: {
     cwd: os.homedir(), settingSources: ["project"], persistSession: false,
-    abortController, tools: [], mcpServers: {},
+    abortController, tools: [], mcpServers: {}, pathToClaudeCodeExecutable: claudeExecutable(),
   } });
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      session.supportedModels().then((rows) => ({ models: parseClaudeModels(rows) })),
+      session.initializationResult().then((init) => ({ models: parseClaudeModels(init.models), version: init.claude_code_version })),
       new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new DiscoveryError("timed out")), timeoutMs); }),
     ]);
   } finally {
@@ -147,13 +150,16 @@ export function parseGeminiModels(output: string): ModelChoice[] {
     const match = /^(gemini-[^\t]+)\t+(.+)$/.exec(line.trim());
     if (!match) continue;
     const [, value, label] = match;
-    const variant = /-(low|medium|high)$/.exec(value);
-    if (!variant) { groups.set(value, { value, label, provider: "gemini", reasoningEfforts: [] }); continue; }
-    const base = value.slice(0, -variant[0].length);
-    const effort = variant[1] as ReasoningEffort;
+    // A variant names its level twice ("gemini-4-hydrogen-xhigh", "Gemini 4
+    // Hydrogen (XHigh)"), so a model merely called Ultra is not taken for one.
+    const effort = /-(\w+)$/.exec(value)?.[1] as ReasoningEffort | undefined;
+    if (!effort || !Object.hasOwn(REASONING_LABELS, effort) || !label.toLowerCase().endsWith(`(${effort})`)) {
+      groups.set(value, { value, label, provider: "gemini", reasoningEfforts: [] }); continue;
+    }
+    const base = value.slice(0, -effort.length - 1);
     const previous = groups.get(base);
     const reasoningModels = { ...previous?.reasoningModels, [effort]: value };
-    const reasoningEfforts = (["low", "medium", "high"] as const).filter((e) => reasoningModels[e]);
+    const reasoningEfforts = (Object.keys(REASONING_LABELS) as ReasoningEffort[]).filter((e) => reasoningModels[e]);
     groups.set(base, { value: reasoningModels.high ?? previous?.value ?? value,
       label, provider: "gemini",
       reasoningEfforts, reasoningModels, defaultReasoningEffort: reasoningEfforts.at(-1) });
@@ -161,8 +167,7 @@ export function parseGeminiModels(output: string): ModelChoice[] {
   return [...groups.values()].map(normalizeChoice);
 }
 
-function agy(args: string[], timeoutMs: number): Promise<string> {
-  const executable = process.env.AUTOPROJECT_AGY_PATH?.trim() || process.env.AUTOPROJECT_GEMINI_PATH?.trim() || "agy";
+function run(executable: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(/* turbopackIgnore: true */ executable, args, {
       cwd: os.homedir(), env: process.env, timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: MAX_OUTPUT,
@@ -171,6 +176,9 @@ function agy(args: string[], timeoutMs: number): Promise<string> {
       : resolve(stdout));
   });
 }
+
+const agy = (args: string[], timeoutMs: number) => run(
+  process.env.AUTOPROJECT_AGY_PATH?.trim() || process.env.AUTOPROJECT_GEMINI_PATH?.trim() || "agy", args, timeoutMs);
 
 export async function discoverGemini(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<Discovery> {
   const [models, version] = await Promise.all([
@@ -181,37 +189,20 @@ export async function discoverGemini(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<
   return { models, version };
 }
 
-function newer(a: number[], b: number[]): boolean {
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const step = (a[i] ?? 0) - (b[i] ?? 0);
-    if (step) return step > 0;
-  }
-  return false;
-}
+const latestCodex = async (): Promise<string> => (await (await fetch("https://registry.npmjs.org/@openai/codex/latest",
+  { signal: AbortSignal.timeout(5000) })).json()).version;
 
-/** The tools list every release they still accept. Keep the newest of each
- * family and drop the rest. Labels are already normalised to "family version"
- * (Opus 5.5, Sol 6.1, Flash 3.8) whatever shape each provider gives its IDs,
- * so they are where every provider agrees on what a family and a version are.
- * A label with no version is its own family. Saved selections this hides stay
- * visible and routable through the retained history. */
-export function latestPerFamily(models: ModelChoice[]): ModelChoice[] {
-  const latest = new Map<string, { model: ModelChoice; version: number[] }>();
-  for (const model of models) {
-    const match = /^(.+) (\d+(?:\.\d+)*)$/.exec(model.label);
-    const family = match ? match[1] : `\0${model.value}`;
-    const version = match ? match[2].split(".").map(Number) : [];
-    const best = latest.get(family);
-    if (!best || newer(version, best.version)) latest.set(family, { model, version });
-  }
-  return [...latest.values()].map(({ model }) => model);
+/** Codex offers a model only to a CLI new enough for it, and an npm install
+ * never updates itself (its own check runs in the TUI alone). A refresh is when
+ * someone wants the newest models, so Codex is updated first when it is behind
+ * the latest release. Any failure keeps what the installed CLI reported. */
+export async function discoverCurrentCodex(latest = latestCodex): Promise<Discovery> {
+  const [found, release] = await Promise.all([discoverCodex(), latest().catch(() => undefined)]);
+  if (!release || !found.version || !newer(release, found.version)) return found;
+  await run(codexPath(), ["update"], 120_000).catch(() => {});
+  return discoverCodex().catch(() => found);
 }
-
-const newest = (discover: () => Promise<Discovery>) => async (): Promise<Discovery> => {
-  const found = await discover();
-  return { ...found, models: latestPerFamily(found.models) };
-};
 
 export const discoverers: Record<ModelProvider, () => Promise<Discovery>> = {
-  codex: newest(discoverCodex), claude: newest(discoverClaude), gemini: newest(discoverGemini),
+  codex: discoverCurrentCodex, claude: discoverClaude, gemini: discoverGemini,
 };

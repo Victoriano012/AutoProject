@@ -105,9 +105,37 @@ export function reasoningEffortsForModel(model: string, catalog: readonly ModelC
 export function resolveReasoningEffort(model: string, effort?: unknown, catalog: readonly ModelChoice[] = MODEL_CHOICES): ReasoningEffort | undefined {
   const choice = modelChoice(model, catalog);
   const supported = choice?.reasoningEfforts ?? [];
+  // A saved variant ID ("gemini-4-hydrogen-xhigh") keeps running that variant.
+  const own = Object.entries(choice?.reasoningModels ?? {}).find(([, id]) => id === model)?.[0];
   return supported.find((level) => level === effort)
+    ?? supported.find((level) => level === own)
     ?? supported.find((level) => level === DEFAULT_REASONING_EFFORT)
     ?? supported.find((level) => level === choice?.defaultReasoningEffort);
+}
+
+/** Whether version `a` ("6.1", "0.172.0") is a later release than `b`. */
+export function newer(a: string, b: string): boolean {
+  const [x, y] = [a, b].map((v) => (/\d+(?:\.\d+)*/.exec(v)?.[0] ?? "").split(".").map(Number));
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const step = (x[i] || 0) - (y[i] || 0);
+    if (step) return step > 0;
+  }
+  return false;
+}
+
+/** The tools list every release they still accept; offer only the newest of
+ * each family. Labels are already "family version" (Opus 5.5, Sol 6.1) whatever
+ * shape each provider gives its IDs, so they are where every provider agrees on
+ * what a family and a version are. A label with no version is its own family. */
+export function latestPerFamily(models: readonly ModelChoice[]): ModelChoice[] {
+  const latest = new Map<string, { model: ModelChoice; version: string }>();
+  for (const model of models) {
+    const [, family, version] = /^(.+) (\d+(?:\.\d+)*)$/.exec(model.label) ?? [, `\0${model.value}`, ""];
+    const key = `${model.provider}\0${family}`;
+    const best = latest.get(key);
+    if (!best || newer(version, best.version)) latest.set(key, { model, version });
+  }
+  return [...latest.values()].map(({ model }) => model);
 }
 
 /** Claude's CLI aliases carry no provider prefix, so a saved `opus` would fall

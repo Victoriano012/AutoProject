@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { query, type ModelUsage, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { tagSession } from "../agent-session";
 import { resumableSession, resolveReasoningEffort } from "./model-settings";
@@ -28,6 +30,18 @@ function claudeUsage(modelUsage: Record<string, ModelUsage>): RunUsage {
     costUsd += u.costUSD;
   }
   return { tokens, costUsd };
+}
+
+/** The person's own `claude` updates itself; the copy bundled with the SDK is
+ * only as new as node_modules. The CLI decides which models exist and what
+ * `opus` means, so discovery and turns both use theirs, else the bundled one. */
+export function claudeExecutable(): string | undefined {
+  const configured = process.env.AUTOPROJECT_CLAUDE_PATH?.trim();
+  if (configured) return configured;
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
+    const file = path.join(dir, "claude");
+    try { fs.accessSync(file, fs.constants.X_OK); return file; } catch { /* not here */ }
+  }
 }
 
 /** Keep unsupported effort values out of the Claude SDK request. */
@@ -78,6 +92,7 @@ export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<Agen
     prompt: input(),
     options: {
       cwd: req.workspaceDir,
+      pathToClaudeCodeExecutable: claudeExecutable(),
       model,
       ...claudeReasoningOptions(req),
       maxTurns: req.maxTurns ?? 150,

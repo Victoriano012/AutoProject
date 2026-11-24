@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createModelCatalog, modelCatalog, catalogModels } from "../lib/server/model-catalog.ts";
-import { reasoningEffortsForModel, type ModelChoice } from "../lib/models.ts";
+import { reasoningEffortsForModel, type ModelChoice, type ReasoningEffort } from "../lib/models.ts";
 import { codexArgs } from "../lib/server/codex.ts";
 import { geminiArgs } from "../lib/server/gemini.ts";
 import { claudeReasoningOptions } from "../lib/server/claude.ts";
@@ -96,6 +96,49 @@ test("an explicit CLI default clears the saved level, while an omitted level sur
   // An omitted level keeps the saved one instead of failing validation on switch.
   assert.equal((await put({ model: "gpt-lite" })).status, 200);
   assert.equal(readConfig().reasoningEffort, undefined);
+});
+
+test("a saved model that Settings no longer offers still runs as saved", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "autoproject-hidden-saved-"));
+  t.mock.method(os, "homedir", () => home);
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const rows: ModelChoice[] = [
+    { value: "opus", label: "Opus 5.5", provider: "claude", reasoningEfforts: ["low", "high"] },
+    { value: "claude-opus-5", label: "Opus 5", provider: "claude", reasoningEfforts: ["low", "high"] },
+    { value: "gpt-6.2-sol", label: "Sol 6.2", provider: "codex", reasoningEfforts: ["low", "high"] },
+    { value: "gpt-6.1-sol", label: "Sol 6.1", provider: "codex", reasoningEfforts: ["low", "high"] },
+    { value: "gemini-4-hydrogen-high", label: "Hydrogen 4", provider: "gemini", reasoningEfforts: ["high", "xhigh"],
+      reasoningModels: { high: "gemini-4-hydrogen-high", xhigh: "gemini-4-hydrogen-xhigh" } },
+    { value: "gemini-3.8-flash-high", label: "Flash 3.8", provider: "gemini", reasoningEfforts: ["low", "high"],
+      reasoningModels: { low: "gemini-3.8-flash-low", high: "gemini-3.8-flash-high" } },
+  ];
+  const cache = createModelCatalog({ file: () => path.join(home, "catalog.json"), discover: async (p) => ({ models: rows.filter((m) => m.provider === p) }) });
+  const snapshot = await cache.refresh();
+  t.mock.method(modelCatalog, "read", () => snapshot);
+  const modelsRoute = await import("../app/api/models/route.ts");
+  const { writeConfig, selectedAgentSettings } = await import("../lib/config.ts");
+  const offered = catalogModels(snapshot).map((m) => m.value);
+  assert.deepEqual(offered, ["opus", "gpt-6.2-sol", "gemini-4-hydrogen-high"]);
+  const runs: Record<string, (s: { model: string; reasoningEffort?: ReasoningEffort; workspaceDir: string }) => unknown> = {
+    "claude-opus-5": (s) => [providerForModel(s.model), claudeReasoningOptions(s)],
+    "gpt-6.1-sol": (s) => [providerForModel(s.model), codexArgs(s).filter((a) => a.includes("6.1") || a.includes("effort"))],
+    "gemini-3.8-flash-high": (s) => [providerForModel(s.model), geminiArgs(s).at(geminiArgs(s).indexOf("--model") + 1)],
+    // Saved back when xhigh was a model of its own, with no level: it keeps running xhigh.
+    "gemini-4-hydrogen-xhigh": (s) => [providerForModel(s.model), geminiArgs(s).at(geminiArgs(s).indexOf("--model") + 1)],
+  };
+  const expected: Record<string, unknown> = {
+    "claude-opus-5": ["claude", { effort: "high" }],
+    "gpt-6.1-sol": ["codex", ["gpt-6.1-sol", 'model_reasoning_effort="high"']],
+    "gemini-3.8-flash-high": ["gemini", "gemini-3.8-flash-high"],
+    "gemini-4-hydrogen-xhigh": ["gemini", "gemini-4-hydrogen-xhigh"],
+  };
+  for (const model of Object.keys(runs)) {
+    writeConfig({ model });
+    const listed = (await (await modelsRoute.GET()).json()).models.at(-1);
+    assert.equal(listed.value, model, "still in the list, as the saved selection");
+    assert.match(listed.label, /\(saved selection\)$/);
+    assert.deepEqual(runs[model]({ ...selectedAgentSettings(), workspaceDir: home }), expected[model]);
+  }
 });
 
 test("saved selections keep one label and stay on their own provider without a catalog", () => {

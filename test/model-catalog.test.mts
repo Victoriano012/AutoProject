@@ -5,8 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { createModelCatalog, catalogModels, knownModels } from "../lib/server/model-catalog.ts";
 import { DiscoveryError } from "../lib/server/discovery-error.ts";
-import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, latestPerFamily, type Discovery } from "../lib/server/model-discovery.ts";
-import { MODEL_CHOICES, normalizeModelLabel, providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
+import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverCurrentCodex, discoverGemini, type Discovery } from "../lib/server/model-discovery.ts";
+import { latestPerFamily, MODEL_CHOICES, normalizeModelLabel, providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
 
 function setEnv(t: test.TestContext, key: string, value: string) {
   const previous = process.env[key];
@@ -78,6 +78,16 @@ test("only the newest release of each family is offered, and a hidden one stays 
     row("haiku", "Haiku 5.5", "claude-haiku-5-5"), row("claude-haiku-4-5-20251001", "Haiku 4.5"), row("claude-opus-4-8", "Opus 4.8"),
   ] as never);
   assert.deepEqual(latestPerFamily(sdk).map((m) => m.label), ["Opus 5.5", "Sonnet 5.5", "Fable 5.2", "Haiku 5.5"]);
+  // Versions compare as numbers, part by part: 6 < 6.2 and 6.9 < 6.10. The
+  // same family name under two providers is two families.
+  const tricky: ModelChoice[] = [
+    { value: "gpt-6-astra", label: "Astra 6", provider: "codex", reasoningEfforts: [] },
+    { value: "gpt-6.2-astra", label: "Astra 6.2", provider: "codex", reasoningEfforts: [] },
+    { value: "gpt-6.9-sol", label: "Sol 6.9", provider: "codex", reasoningEfforts: [] },
+    { value: "gpt-6.10-sol", label: "Sol 6.10", provider: "codex", reasoningEfforts: [] },
+    { value: "gemini-6-sol-high", label: "Sol 6", provider: "gemini", reasoningEfforts: [] },
+  ];
+  assert.deepEqual(latestPerFamily(tricky).map((m) => m.value), ["gpt-6.2-astra", "gpt-6.10-sol", "gemini-6-sol-high"]);
   // A superseded model someone already picked must remain visible and routable.
   const listed = withSelectedModel(latestPerFamily(codex), "gpt-5.6-sol", codex);
   assert.deepEqual(listed.at(-1), { value: "gpt-5.6-sol", label: "Sol 5.6 (saved selection)", provider: "codex", reasoningEfforts: [], defaultReasoningEffort: undefined });
@@ -90,6 +100,17 @@ test("Gemini offers only listed variants and ignores other providers and progres
   assert.deepEqual(models[0].reasoningModels, { low: "gemini-new-low", high: "gemini-new-high" });
   assert.deepEqual(models[1].reasoningEfforts, []);
   assert.equal(resolveReasoningEffort("gemini-new-high", "medium", models), "high");
+});
+
+test("every agy reasoning variant folds into one entry, including ones added later", () => {
+  // `agy models` on 2026-11-24 (agy 1.5.16), plus a model that is only named Ultra.
+  const [hydrogen, ...rest] = parseGeminiModels(AGY_OUTPUT + "gemini-4-ultra\tGemini 4 Ultra\n");
+  assert.equal(hydrogen.label, "Hydrogen 4");
+  assert.equal(hydrogen.value, "gemini-4-hydrogen-high");
+  assert.deepEqual(hydrogen.reasoningEfforts, ["low", "medium", "high", "xhigh"]);
+  assert.equal(hydrogen.reasoningModels?.xhigh, "gemini-4-hydrogen-xhigh");
+  assert.deepEqual(rest.map((m) => [m.value, m.label, m.reasoningEfforts.length]), [
+    ["gemini-3.8-flash-high", "Flash 3.8", 3], ["gemini-4-ultra", "Ultra 4", 0]]);
 });
 
 test("reads never discover, refreshes always do and coalesce, and partial successes persist", async (t) => {
@@ -271,6 +292,9 @@ test("Claude's Default alias is not a model, and picking it still resolves", () 
     { value: "opus", resolvedModel: "claude-opus-5", displayName: "Opus", description: "Opus 5.5 \u00b7 Best for everyday, complex tasks", supportedEffortLevels: ["low", "high"] },
   ]);
   assert.deepEqual(models.map((m) => [m.value, m.label]), [["opus", "Opus 5.5"]]);
+  // Today's CLI names the version in displayName; free description text that
+  // happens to hold a number never becomes the name.
+  assert.equal(parseClaudeModels([{ value: "fable", displayName: "Fable 5.2", description: "Fable with 1M context \u00b7 x" }])[0].label, "Fable 5.2");
   // Someone already saved it: it must stay visible, selectable and Claude-routed.
   const listed = withSelectedModel(models, "default");
   assert.equal(listed.length, 2);
@@ -279,67 +303,132 @@ test("Claude's Default alias is not a model, and picking it still resolves", () 
   assert.equal(providerForModel("default", models), "claude");
 });
 
-// Captured from the installed CLIs on 2026-11-19: codex 0.160.0, claude 2.1.310,
-// agy 1.4.7. A refresh has to carry a newly released model all the way through.
+// Captured from the installed CLIs on 2026-11-24: codex 0.172.0, claude 2.1.331,
+// agy 1.5.16. A refresh has to carry a newly released model all the way through.
+const codexRow = (model: string, displayName: string, hidden = false) =>
+  ({ model, displayName, hidden, supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }], defaultReasoningEffort: "low" });
 const CODEX_ROWS = [
-  { model: "gpt-6.1-terra", displayName: "GPT-6.1 Terra", hidden: false, isDefault: true,
-    supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }, { reasoningEffort: "ultra" }], defaultReasoningEffort: "low" },
-  { model: "gpt-6.1-sol", displayName: "GPT-6.1-Sol", hidden: false,
-    supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }], defaultReasoningEffort: "low" },
-  { model: "gpt-6-sol", displayName: "GPT-6-Sol", hidden: false,
-    supportedReasoningEfforts: [{ reasoningEffort: "low" }], defaultReasoningEffort: "low" },
-  { model: "gpt-reserve", displayName: "GPT-Reserve", hidden: true, supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
+  codexRow("gpt-6.2-sol", "GPT-6.2-Sol"), codexRow("gpt-6.2-astra", "GPT-6.2-Astra"), codexRow("gpt-6.1-terra", "GPT-6.1 Terra"),
+  codexRow("gpt-reserve", "GPT-Reserve", true), codexRow("gpt-6.1-sol", "GPT-6.1-Sol"), codexRow("gpt-6-astra", "GPT-6-Astra"),
+  codexRow("gpt-6-sol", "GPT-6-Sol"), codexRow("gpt-6-luna", "GPT-6-Luna"), codexRow("gpt-5.6-sol", "GPT-5.6-Sol"),
+  codexRow("gpt-5.6-terra", "GPT-5.6-Terra"), codexRow("gpt-5.6-luna", "GPT-5.6-Luna"),
 ];
+const claudeRow = (value: string, displayName: string, resolvedModel = value) =>
+  ({ value, resolvedModel, displayName, description: "For complex tasks", supportsEffort: true, supportedEffortLevels: ["low", "high"] });
 const CLAUDE_ROWS = [
-  { value: "default", resolvedModel: "claude-opus-5", displayName: "Default (recommended)", description: "Opus 5 \u00b7 Best for everyday, complex tasks", supportsEffort: true, supportedEffortLevels: ["low", "high"] },
-  { value: "opus", resolvedModel: "claude-opus-5", displayName: "Opus", description: "Opus 5 \u00b7 Best for everyday, complex tasks", supportsEffort: true, supportedEffortLevels: ["low", "high"] },
-  { value: "claude-fable-5[1m]", resolvedModel: "claude-fable-5[1m]", displayName: "Fable", description: "Fable 5 \u00b7 Most capable for your hardest and longest-running tasks", supportsEffort: true, supportedEffortLevels: ["low", "high"] },
-  { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku", description: "Haiku 4.5 \u00b7 Fastest for quick answers" },
-] as const;
+  claudeRow("default", "Default (recommended)", "claude-opus-5-5"), claudeRow("opus", "Opus 5.5", "claude-opus-5-5"),
+  claudeRow("claude-opus-5", "Opus 5"), claudeRow("sonnet", "Sonnet 5.5", "claude-sonnet-5-5"), claudeRow("claude-sonnet-5", "Sonnet 5"),
+  claudeRow("fable", "Fable 5.2", "claude-fable-5-2"), claudeRow("claude-fable-5-1", "Fable 5.1"), claudeRow("haiku", "Haiku 5.5", "claude-haiku-5-5"),
+  { value: "claude-haiku-4-5-20251001", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku 4.5", description: "Fastest for quick answers" },
+  claudeRow("claude-fable-5", "Fable 5"), claudeRow("claude-opus-4-8", "Opus 4.8"), claudeRow("claude-opus-4-7", "Opus 4.7"),
+  claudeRow("claude-opus-4-6", "Opus 4.6"), claudeRow("claude-sonnet-4-6", "Sonnet 4.6"),
+];
 const AGY_OUTPUT = [
   "Fetching available models...",
+  "gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)",
+  "gemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)",
+  "gemini-4-hydrogen-medium\tGemini 4 Hydrogen (Medium)",
+  "gemini-4-hydrogen-low\tGemini 4 Hydrogen (Low)",
   "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+  "gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)",
   "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)",
   "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)",
+  "claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)",
   "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)",
   "",
 ].join("\n");
 
-test("a newly released model reaches the list Settings renders, for every provider", async (t) => {
+test("Settings offers only the newest of each family, without Flash, and a future release replaces it", async (t) => {
   const dir = fixture(t);
   let released = false;
+  // The tools' raw answers: the catalog decides what Settings offers.
   const discover = async (provider: string): Promise<Discovery> => {
-    if (provider === "codex") return { models: latestPerFamily(parseCodexModels(
-      released ? [{ model: "gpt-6.2-sol", displayName: "GPT-6.2-Sol", hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "high" }], defaultReasoningEffort: "high" }, ...CODEX_ROWS] : CODEX_ROWS)) };
-    if (provider === "claude") return { models: latestPerFamily(parseClaudeModels(CLAUDE_ROWS.map((row) =>
-      // The alias "opus" is unchanged by the release; what it points at is not.
-      released && row.value === "opus"
-        ? { ...row, resolvedModel: "claude-opus-6", description: "Opus 6 \u00b7 Best for everyday, complex tasks" }
-        : row) as never)) };
-    return { models: latestPerFamily(parseGeminiModels(AGY_OUTPUT + (released ? "gemini-4-pro-high\tGemini 4 Pro (High)\ngemini-4-pro-low\tGemini 4 Pro (Low)\n" : ""))) };
+    if (provider === "codex") return { models: parseCodexModels([...CODEX_ROWS, ...released ? [codexRow("gpt-6.3-luna", "GPT-6.3-Luna")] : []]) };
+    if (provider === "claude") return { models: parseClaudeModels((released
+      // `opus` moves on to Opus 5.6, so Opus 5.5 is listed by its own ID again.
+      ? [claudeRow("opus", "Opus 5.6", "claude-opus-5-6"), claudeRow("claude-opus-5-5", "Opus 5.5"), ...CLAUDE_ROWS.slice(2)]
+      : CLAUDE_ROWS) as never) };
+    return { models: parseGeminiModels(AGY_OUTPUT + (released
+      ? "gemini-4.1-hydrogen-high\tGemini 4.1 Hydrogen (High)\ngemini-4-argon-high\tGemini 4 Argon (High)\ngemini-3.9-flash-high\tGemini 3.9 Flash (High)\n"
+      : "")) };
   };
   const cache = createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover });
   const shown = async () => {
     const catalog = await cache.refresh();
-    return withSelectedModel(catalogModels(catalog), "gpt-6.1-sol", knownModels(catalog)).map((m) => `${m.value}=${m.label}`);
+    return withSelectedModel(catalogModels(catalog), "claude-opus-5", knownModels(catalog)).map((m) => `${m.value}=${m.label}`);
   };
-  // Superseded releases, the hidden row, the "default" alias and agy's
-  // non-Gemini rows are all meant to be absent; nothing else is.
   assert.deepEqual(await shown(), [
-    "opus=Opus 5", "claude-fable-5[1m]=Fable 5", "haiku=Haiku 4.5",
-    "gpt-6.1-terra=Terra 6.1", "gpt-6.1-sol=Sol 6.1",
-    "gemini-3.8-flash-high=Flash 3.8",
+    "opus=Opus 5.5", "sonnet=Sonnet 5.5", "fable=Fable 5.2", "haiku=Haiku 5.5",
+    "gpt-6.2-sol=Sol 6.2", "gpt-6.2-astra=Astra 6.2", "gpt-6.1-terra=Terra 6.1", "gpt-6-luna=Luna 6",
+    "gemini-4-hydrogen-high=Hydrogen 4",
+    "claude-opus-5=Opus 5 (saved selection)",
   ]);
   released = true;
-  // Every provider's new release is in the list, and the model that was saved
-  // before it landed is still there to switch back to.
   assert.deepEqual(await shown(), [
-    "opus=Opus 6", "claude-fable-5[1m]=Fable 5", "haiku=Haiku 4.5",
-    "gpt-6.2-sol=Sol 6.2", "gpt-6.1-terra=Terra 6.1",
-    "gemini-3.8-flash-high=Flash 3.8", "gemini-4-pro-high=Pro 4",
-    "gpt-6.1-sol=Sol 6.1 (saved selection)",
+    "opus=Opus 5.6", "sonnet=Sonnet 5.5", "fable=Fable 5.2", "haiku=Haiku 5.5",
+    "gpt-6.2-sol=Sol 6.2", "gpt-6.2-astra=Astra 6.2", "gpt-6.1-terra=Terra 6.1", "gpt-6.3-luna=Luna 6.3",
+    "gemini-4.1-hydrogen-high=Hydrogen 4.1", "gemini-4-argon-high=Argon 4",
+    "claude-opus-5=Opus 5 (saved selection)",
   ]);
-  assert.equal(reasoningEffortsForModel("gpt-6.2-sol", catalogModels(await cache.refresh())).join(), "high");
+  // Flash is gone from the bundled fallback too, not just from discovery.
+  assert.ok(!catalogModels(createModelCatalog({ file: () => path.join(dir, "none.json"), discover }).read()).some((m) => /Flash/.test(m.label)));
+});
+
+test("every press of Refresh asks every tool again, even after one failed", async (t) => {
+  const home = fixture(t);
+  t.mock.method(os, "homedir", () => home);
+  const { discoverers } = await import("../lib/server/model-discovery.ts");
+  const calls: Record<string, number> = {};
+  for (const provider of ["claude", "codex", "gemini"] as const) {
+    t.mock.method(discoverers, provider, async () => {
+      calls[provider] = (calls[provider] ?? 0) + 1;
+      if (provider === "codex" && calls.codex === 1) throw new DiscoveryError("timed out");
+      return { models: [{ value: `${provider}-model`, label: "Model", provider, reasoningEfforts: [] }] };
+    });
+  }
+  const { POST } = await import("../app/api/models/route.ts");
+  for (let press = 1; press <= 3; press++) {
+    await (await POST()).json();
+    assert.deepEqual(calls, { claude: press, codex: press, gemini: press });
+  }
+});
+
+test("a refresh updates a Codex that is behind the latest release before asking it", async (t) => {
+  const dir = fixture(t);
+  const executable = path.join(dir, "codex");
+  const installed = path.join(dir, "version");
+  fs.writeFileSync(installed, "0.160.0");
+  fs.writeFileSync(executable, `#!/usr/bin/env node
+const fs = require('node:fs');
+if (process.argv[2] === 'update') { fs.writeFileSync(${JSON.stringify(installed)}, '0.172.0'); process.exit(0); }
+const version = fs.readFileSync(${JSON.stringify(installed)}, 'utf8');
+require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+  const req = JSON.parse(line);
+  if (req.method === 'initialize') console.log(JSON.stringify({ id: req.id, result: { userAgent: 'autoproject/' + version + ' (Mac OS)' } }));
+  if (req.method === 'model/list') console.log(JSON.stringify({ id: req.id, result: { data: [{ model: version === '0.172.0' ? 'gpt-6.2-sol' : 'gpt-6.1-sol' }], nextCursor: null } }));
+});
+`, { mode: 0o700 });
+  setEnv(t, "AUTOPROJECT_CODEX_PATH", executable);
+  // Up to date (or npm unreachable): asked once, never updated.
+  for (const latest of [async () => "0.160.0", async () => { throw new Error("offline"); }]) {
+    assert.deepEqual((await discoverCurrentCodex(latest)).models.map((m) => m.value), ["gpt-6.1-sol"]);
+    assert.equal(fs.readFileSync(installed, "utf8"), "0.160.0");
+  }
+  const found = await discoverCurrentCodex(async () => "0.172.0");
+  assert.equal(found.version, "0.172.0");
+  assert.deepEqual(found.models.map((m) => m.value), ["gpt-6.2-sol"]);
+});
+
+test("Claude runs the person's own, self-updating CLI when there is one", async (t) => {
+  const { claudeExecutable } = await import("../lib/server/claude.ts");
+  const dir = fixture(t);
+  setEnv(t, "AUTOPROJECT_CLAUDE_PATH", "");
+  setEnv(t, "PATH", dir);
+  assert.equal(claudeExecutable(), undefined, "none installed: the SDK's bundled copy");
+  fs.writeFileSync(path.join(dir, "claude"), "#!/bin/sh\n", { mode: 0o700 });
+  assert.equal(claudeExecutable(), path.join(dir, "claude"));
+  setEnv(t, "AUTOPROJECT_CLAUDE_PATH", "/opt/claude");
+  assert.equal(claudeExecutable(), "/opt/claude");
 });
 
 test("a provider that fails says which one and why, without leaking the raw error", async (t) => {

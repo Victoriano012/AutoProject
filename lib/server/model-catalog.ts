@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DiscoveryError, discoveryReason } from "./discovery-error";
 import type { Discovery } from "./model-discovery";
-import { MODEL_CHOICES, REASONING_LABELS, type ModelChoice, type ModelProvider } from "../models";
+import { latestPerFamily, MODEL_CHOICES, REASONING_LABELS, type ModelChoice, type ModelProvider } from "../models";
 
 const PROVIDERS: ModelProvider[] = ["claude", "codex", "gemini"];
 export interface ProviderCatalog {
@@ -40,13 +40,18 @@ function defaults(): ModelCatalog {
   }])) as ModelCatalog["providers"] };
 }
 
+const reported = (catalog: ModelCatalog) => PROVIDERS.flatMap((p) => catalog.providers[p].models);
+
+/** What Settings offers. The cache keeps everything the tools reported, so this
+ * applies to old snapshots too. Gemini Flash is left out at the person's
+ * request; a saved one still runs through `knownModels`. */
 export function catalogModels(catalog: ModelCatalog): ModelChoice[] {
-  return PROVIDERS.flatMap((p) => catalog.providers[p].models);
+  return latestPerFamily(reported(catalog)).filter((m) => !(m.provider === "gemini" && /^Flash \d/.test(m.label)));
 }
 
 export function knownModels(catalog: ModelCatalog): ModelChoice[] {
   // Current capabilities override historical and bundled metadata, including [].
-  return [...new Map([...MODEL_CHOICES, ...catalog.retained, ...catalogModels(catalog)].map((m) => [m.value, m])).values()];
+  return [...new Map([...MODEL_CHOICES, ...catalog.retained, ...reported(catalog)].map((m) => [m.value, m])).values()];
 }
 
 /** Disk snapshots also share discovery with Next route workers and restarts.
