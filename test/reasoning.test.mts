@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MODEL_CHOICES, reasoningEffortsForModel, resolveReasoningEffort } from "../lib/models.ts";
 import { claudeReasoningOptions } from "../lib/server/agent.ts";
-import { codexArgs } from "../lib/server/codex.ts";
+import { codexThread } from "../lib/server/codex.ts";
 import { geminiArgs } from "../lib/server/gemini.ts";
 
 test("every adjustable model defaults to High; Haiku omits effort", () => {
@@ -37,8 +37,8 @@ test("Codex sends each supported effort for both new and resumed turns", () => {
   for (const model of MODEL_CHOICES.filter((model) => model.provider === "codex")) {
     for (const effort of model.reasoningEfforts) {
       for (const sessionId of [undefined, "codex:existing-thread"]) {
-        const args = codexArgs({ model: model.value, reasoningEffort: effort, sessionId, workspaceDir: "/tmp" });
-        assert.equal(args[args.indexOf("--config") + 1], `model_reasoning_effort="${effort}"`);
+        const { params } = codexThread({ model: model.value, reasoningEffort: effort, sessionId, workspaceDir: "/tmp" });
+        assert.deepEqual(params.config, { model_reasoning_effort: effort });
       }
     }
   }

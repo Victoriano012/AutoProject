@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { createModelCatalog, modelCatalog, catalogModels } from "../lib/server/model-catalog.ts";
 import { reasoningEffortsForModel, type ModelChoice, type ReasoningEffort } from "../lib/models.ts";
-import { codexArgs } from "../lib/server/codex.ts";
+import { codexThread } from "../lib/server/codex.ts";
 import { geminiArgs } from "../lib/server/gemini.ts";
 import { claudeReasoningOptions } from "../lib/server/claude.ts";
 import { providerForModel, resumableSession } from "../lib/server/model-settings.ts";
@@ -50,7 +50,7 @@ test("Settings, config validation, sessions and execution share discovered metad
       assert.equal((await (await GET()).json()).reasoningEffort, effort);
       assert.deepEqual(selectedAgentSettings(), { model: model.value, reasoningEffort: effort });
       const request = { model: model.value, reasoningEffort: effort };
-      if (model.provider === "codex") assert.ok(codexArgs(request).includes(`model_reasoning_effort="${effort}"`));
+      if (model.provider === "codex") assert.deepEqual(codexThread(request).params.config, { model_reasoning_effort: effort });
       if (model.provider === "claude") assert.deepEqual(claudeReasoningOptions(request), { effort });
       if (model.provider === "gemini") assert.ok(geminiArgs(request).includes(model.reasoningModels![effort]!));
     }
@@ -58,7 +58,7 @@ test("Settings, config validation, sessions and execution share discovered metad
   assert.equal((await put({ model: "gemini-new-high", reasoningEffort: "medium" })).status, 400);
   assert.equal((await put({ model: "gpt-unknown", reasoningEffort: "high" })).status, 400);
   assert.equal((await put({ model: "gpt-unknown" })).status, 200);
-  assert.equal(codexArgs({ model: "gpt-unknown", reasoningEffort: "high" }).includes("--config"), false);
+  assert.equal(codexThread({ model: "gpt-unknown", reasoningEffort: "high" }).params.config, undefined);
   assert.equal(providerForModel("sonnet"), "claude");
   assert.equal(resumableSession("codex:thread", "sonnet"), undefined);
   assert.deepEqual(resumableSession("claude:session", "sonnet"), { stored: "claude:session", raw: "session" });
@@ -88,7 +88,7 @@ test("an explicit CLI default clears the saved level, while an omitted level sur
   assert.equal((await put({ model: "gpt-lite", reasoningEffort: null })).status, 200);
   assert.deepEqual(readConfig(), { model: "gpt-lite" });
   assert.equal((await (await GET()).json()).reasoningEffort, undefined);
-  assert.equal(codexArgs({ model: "gpt-lite" }).includes("--config"), false);
+  assert.equal(codexThread({ model: "gpt-lite" }).params.config, undefined);
 
   // A model with a resolvable default cannot be forced below it.
   assert.equal((await put({ model: "gpt-full", reasoningEffort: null })).status, 200);
@@ -121,14 +121,14 @@ test("a saved model that Settings no longer offers still runs as saved", async (
   assert.deepEqual(offered, ["opus", "gpt-6.2-sol", "gemini-4-hydrogen-high"]);
   const runs: Record<string, (s: { model: string; reasoningEffort?: ReasoningEffort; workspaceDir: string }) => unknown> = {
     "claude-opus-5": (s) => [providerForModel(s.model), claudeReasoningOptions(s)],
-    "gpt-6.1-sol": (s) => [providerForModel(s.model), codexArgs(s).filter((a) => a.includes("6.1") || a.includes("effort"))],
+    "gpt-6.1-sol": (s) => [providerForModel(s.model), codexThread(s).params.model, codexThread(s).params.config],
     "gemini-3.8-flash-high": (s) => [providerForModel(s.model), geminiArgs(s).at(geminiArgs(s).indexOf("--model") + 1)],
     // Saved back when xhigh was a model of its own, with no level: it keeps running xhigh.
     "gemini-4-hydrogen-xhigh": (s) => [providerForModel(s.model), geminiArgs(s).at(geminiArgs(s).indexOf("--model") + 1)],
   };
   const expected: Record<string, unknown> = {
     "claude-opus-5": ["claude", { effort: "high" }],
-    "gpt-6.1-sol": ["codex", ["gpt-6.1-sol", 'model_reasoning_effort="high"']],
+    "gpt-6.1-sol": ["codex", "gpt-6.1-sol", { model_reasoning_effort: "high" }],
     "gemini-3.8-flash-high": ["gemini", "gemini-3.8-flash-high"],
     "gemini-4-hydrogen-xhigh": ["gemini", "gemini-4-hydrogen-xhigh"],
   };

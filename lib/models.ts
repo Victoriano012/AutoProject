@@ -207,13 +207,12 @@ export function withSelectedModel(catalog: readonly ModelChoice[], selected: str
 /** Provider capabilities are independent of each model's reasoning choices.
  * Orchestration uses this catalog instead of testing provider names. */
 export const PROVIDER_CAPABILITIES: Record<ModelProvider, {
-  liveMessages: boolean;
   boardTools: boolean;
   structuredOutput: boolean;
   subagents: boolean;
   reportedCost: boolean;
 }> = {
-  claude: { liveMessages: true, boardTools: true, structuredOutput: true, subagents: true, reportedCost: true },
-  codex: { liveMessages: false, boardTools: false, structuredOutput: true, subagents: false, reportedCost: false },
-  gemini: { liveMessages: false, boardTools: false, structuredOutput: true, subagents: false, reportedCost: false },
+  claude: { boardTools: true, structuredOutput: true, subagents: true, reportedCost: true },
+  codex: { boardTools: false, structuredOutput: true, subagents: false, reportedCost: false },
+  gemini: { boardTools: false, structuredOutput: true, subagents: false, reportedCost: false },
 };

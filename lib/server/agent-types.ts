@@ -15,9 +15,9 @@ export interface RunUsage {
 /** One agent turn, as the ticket runner consumes it. */
 export type AgentEvent =
   | { type: "init"; sessionId: string }
-  /** Claude only, before init: `push` hands a follow-up message to the running
-   * turn, which the model sees with its next tool result; false once the turn
-   * is over and the message must wait for a new one. */
+  /** `push` hands a follow-up message to the running turn: Claude and Codex
+   * read it at their next step, agy's turn is cut for it (see gemini.ts).
+   * False once the turn is over and the message must wait for a new one. */
   | { type: "input"; push: (text: string) => boolean }
   /** `sub`: produced inside a subagent (act mode), so a transcript can indent it. */
   | { type: "text"; text: string; sub?: boolean }

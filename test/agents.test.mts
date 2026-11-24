@@ -6,7 +6,7 @@ import {
   tagSession,
 } from "../lib/agent-session.ts";
 import { MODEL_CHOICES, providerForModel } from "../lib/models.ts";
-import { codexArgs } from "../lib/server/codex.ts";
+import { codexThread } from "../lib/server/codex.ts";
 import { geminiArgs } from "../lib/server/gemini.ts";
 
 test("settings expose only the requested Codex and Gemini model families", () => {
@@ -60,52 +60,41 @@ test("legacy sessions remain Claude sessions and providers never cross-resume", 
   });
 });
 
-test("new Codex work runs through the CLI with the selected model and workspace", () => {
-  const args = codexArgs({
+test("new Codex work opens a thread with the selected model and workspace", () => {
+  assert.deepEqual(codexThread({
     model: "gpt-5.6-sol",
     workspaceDir: "/tmp/autoproject-test-workspace",
     writeAccess: true,
+  }), {
+    method: "thread/start",
+    params: {
+      model: "gpt-5.6-sol",
+      cwd: "/tmp/autoproject-test-workspace",
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      config: { model_reasoning_effort: "high" },
+    },
   });
-  assert.deepEqual(args, [
-    "exec",
-    "--json",
-    "--model",
-    "gpt-5.6-sol",
-    "--skip-git-repo-check",
-    "--config",
-    'model_reasoning_effort="high"',
-    "--dangerously-bypass-approvals-and-sandbox",
-    "--cd",
-    "/tmp/autoproject-test-workspace",
-    "-",
-  ]);
 });
 
-test("Codex planner resumes keep their thread and structured-output schema", () => {
-  const args = codexArgs(
-    {
+test("Codex planner resumes keep their thread, read-only", () => {
+  assert.deepEqual(codexThread({
+    model: "gpt-5.6-luna",
+    reasoningEffort: "max",
+    sessionId: "codex:thread-456",
+    workspaceDir: "/tmp/autoproject-test-workspace",
+    writeAccess: false,
+  }), {
+    method: "thread/resume",
+    params: {
+      threadId: "thread-456",
       model: "gpt-5.6-luna",
-      reasoningEffort: "max",
-      sessionId: "codex:thread-456",
-      workspaceDir: "/tmp/autoproject-test-workspace",
-      writeAccess: false,
+      cwd: "/tmp/autoproject-test-workspace",
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      config: { model_reasoning_effort: "max" },
     },
-    "/tmp/schema.json"
-  );
-  assert.deepEqual(args, [
-    "exec",
-    "resume",
-    "thread-456",
-    "--json",
-    "--model",
-    "gpt-5.6-luna",
-    "--skip-git-repo-check",
-    "--config",
-    'model_reasoning_effort="max"',
-    "--output-schema",
-    "/tmp/schema.json",
-    "-",
-  ]);
+  });
 });
 
 test("new Gemini work runs through agy with the selected model and write access", () => {

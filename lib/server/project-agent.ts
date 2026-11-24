@@ -130,9 +130,10 @@ function requests(dir: string): AgentRequest[] {
 /** Queue one message for the project agent, in `mode`. It runs as soon as the
  * turns before it are done; the reply travels through the project feed. In the
  * chat (act) the person is talking to the agent at work, so while an act turn
- * runs the message goes straight into it instead — the agent hears it with its
- * next tool result, or at once while it only waits on its subagents — and it
- * is written to the transcript now, as heard. */
+ * runs the message goes straight into it instead — the agent hears it at its
+ * next step, or at once while it only waits on its subagents (on Gemini, at
+ * once: the step at work is cut) — and it is written to the transcript now,
+ * as heard. */
 export function sendToAgent(dir: string, mode: Mode, message: string): AgentRequest | null {
   if (registry.removing.has(dir)) throw new Error("Project is being removed");
   if (!ensureLoaded(dir)) throw new Error(`No project at ${dir}`);

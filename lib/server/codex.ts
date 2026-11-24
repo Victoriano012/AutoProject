@@ -9,65 +9,63 @@ interface CodexItem {
   text?: string;
   command?: string;
   query?: string;
-  name?: string;
+  tool?: string;
   server?: string;
   changes?: { path?: string }[];
 }
 
-interface CodexEvent {
-  type?: string;
-  thread_id?: string;
-  message?: string;
-  error?: { message?: string } | string;
-  item?: CodexItem;
-  /** turn.completed only. Codex reports tokens but never a cost. */
-  usage?: { input_tokens?: number; output_tokens?: number };
+/** One line from `codex app-server`: an answer to one of our requests, a
+ * notification, or (method and id) a request of its own. */
+interface CodexMessage {
+  id?: number;
+  method?: string;
+  result?: { thread?: { id: string }; turn?: { id: string } };
+  error?: { message?: string };
+  params?: {
+    item?: CodexItem;
+    turn?: { id: string; status?: string; error?: { message?: string } | null };
+    tokenUsage?: { last?: { inputTokens?: number; outputTokens?: number } };
+    error?: { message?: string };
+    willRetry?: boolean;
+  };
 }
 
-/** Kept separate and exported so the CLI contract can be tested without
- * starting a model run. */
-export function codexArgs(
-  req: Pick<
-    AgentRequest,
-    "model" | "sessionId" | "workspaceDir" | "writeAccess" | "reasoningEffort"
-  >,
-  schemaPath?: string
-): string[] {
+/** How the thread is opened. Kept separate and exported so the CLI contract
+ * can be tested without starting a model run. */
+export function codexThread(
+  req: Pick<AgentRequest, "model" | "sessionId" | "workspaceDir" | "writeAccess" | "reasoningEffort">
+): { method: "thread/start" | "thread/resume"; params: Record<string, unknown> } {
   const model = req.model!;
   const resume = resumableSession(req.sessionId, model);
-  const args = ["exec"];
-  if (resume) args.push("resume", resume.raw);
-  args.push("--json", "--model", model, "--skip-git-repo-check");
   const effort = resolveReasoningEffort(model, req.reasoningEffort);
-  if (effort) args.push("--config", `model_reasoning_effort="${effort}"`);
-  if (schemaPath) args.push("--output-schema", schemaPath);
-  if (req.writeAccess) args.push("--dangerously-bypass-approvals-and-sandbox");
-  else if (!resume) args.push("--sandbox", "read-only");
-  if (!resume) args.push("--cd", req.workspaceDir!);
-  args.push("-");
-  return args;
-}
-
-function errorText(event: CodexEvent): string {
-  if (typeof event.error === "string") return event.error;
-  return event.error?.message ?? event.message ?? "Codex run failed";
+  return {
+    method: resume ? "thread/resume" : "thread/start",
+    params: {
+      ...(resume && { threadId: resume.raw }),
+      model,
+      cwd: req.workspaceDir,
+      approvalPolicy: "never",
+      sandbox: req.writeAccess ? "danger-full-access" : "read-only",
+      ...(effort && { config: { model_reasoning_effort: effort } }),
+    },
+  };
 }
 
 function toolText(item: CodexItem): string | undefined {
-  if (item.type === "command_execution") {
+  if (item.type === "commandExecution") {
     return item.command ? `Bash: ${item.command.slice(0, 200)}` : "Bash";
   }
-  if (item.type === "file_change") {
+  if (item.type === "fileChange") {
     const files = item.changes?.flatMap((change) =>
       change.path ? [change.path] : []
     );
     return files?.length ? `Edit: ${files.join(", ").slice(0, 200)}` : "Edit files";
   }
-  if (item.type === "mcp_tool_call") {
-    const name = [item.server, item.name].filter(Boolean).join(": ");
+  if (item.type === "mcpToolCall") {
+    const name = [item.server, item.tool].filter(Boolean).join(": ");
     return name ? `MCP: ${name}` : "MCP tool";
   }
-  if (item.type === "web_search") {
+  if (item.type === "webSearch") {
     return item.query ? `Web search: ${item.query.slice(0, 200)}` : "Web search";
   }
   if (item.type === "plan") return "Update plan";
@@ -105,8 +103,11 @@ export function updateWhenIdle<T>(update: () => Promise<T>): Promise<T> | undefi
   return lock.then(() => running);
 }
 
-/** Codex's documented JSONL mode supplies session, progress, tool, and final
- * message events while auth stays entirely inside the local Codex CLI. */
+
+/** Codex's app-server protocol supplies session, progress, tool, and final
+ * message events while auth stays entirely inside the local Codex CLI. It also
+ * takes a message mid-turn, which the model reads at its next step, as Claude
+ * does. */
 export async function* streamCodexAgent(req: AgentRequest): AsyncGenerator<AgentEvent> {
   const release = await holdCodex(req.signal).catch(() => undefined);
   try {
@@ -119,73 +120,121 @@ async function* runCodex(req: AgentRequest): AsyncGenerator<AgentEvent> {
   const cli = await createCliSession(req, {
     label: "Codex",
     executable: process.env.AUTOPROJECT_CODEX_PATH?.trim() || "codex",
-    args: (schemaPath) => codexArgs(req, schemaPath),
-    stdin: req.prompt,
+    args: () => ["app-server"],
+    interactive: true,
   });
+  let id = 0;
+  const call = (method: string, params: unknown) => {
+    cli.send({ id: ++id, method, params });
+    return id;
+  };
+  call("initialize", { clientInfo: { name: "autoproject", title: "AutoProject", version: "0.1.0" }, capabilities: null });
+  cli.send({ method: "initialized" });
+  const thread = codexThread(req);
+  const opening = call(thread.method, thread.params);
+  let threadId = "";
+  // turn/start on a turn at work adds the message to it (a steer), the model
+  // reading it at its next step; on an idle thread it starts the next turn.
+  // The process ends once every message sent has been answered.
+  const asked = new Set<number>();
+  const open = new Set<string>();
+  const over = new Set<string>();
+  let closed = false;
+  const send = (text: string) => asked.add(call("turn/start", {
+    threadId,
+    input: [{ type: "text", text, text_elements: [] }],
+    ...(req.outputSchema && { outputSchema: req.outputSchema }),
+  }));
+  // Worded as Claude Code words a message sent mid-turn, or the model may
+  // finish what it was doing and never answer it.
+  const push = (text: string): boolean => {
+    if (closed) return false;
+    send(`The person sent this while you were working:\n\n${text}\n\nAnswer it now, then carry on with your work.`);
+    return true;
+  };
   let finalText = "";
+  let failure: string | undefined;
+  let tokens = 0;
   let resultSent = false;
   const seenTools = new Set<string>();
 
   try {
     for await (const raw of cli.events) {
-      const event = raw as CodexEvent;
-
-      if (event.type === "thread.started" && event.thread_id) {
-        yield {
-          type: "init",
-          sessionId: tagSession("codex", event.thread_id),
-        };
-      } else if (event.type === "item.completed" && event.item) {
-        if (event.item.type === "agent_message" && event.item.text?.trim()) {
-          finalText = event.item.text;
-          yield { type: "text", text: event.item.text };
-        } else {
-          const text = toolText(event.item);
-          const key = event.item.id ?? `${event.item.type}:${text}`;
-          if (text && !seenTools.has(key)) {
-            seenTools.add(key);
-            yield { type: "tool", text };
-          }
+      const msg = raw as CodexMessage;
+      const params = msg.params ?? {};
+      if (msg.method && msg.id !== undefined) {
+        // Approvals never come (approvalPolicy "never"); nothing else can be answered headless.
+        cli.send({ id: msg.id, error: { code: -32601, message: "Not supported" } });
+      } else if (msg.id === opening) {
+        if (!msg.result?.thread) {
+          // A thread Codex no longer has: "no rollout found for thread id …".
+          resultSent = true;
+          yield { type: "error", message: msg.error?.message ?? "Codex could not open the thread" };
+          break;
         }
-      } else if (event.type === "item.started" && event.item) {
-        const text = toolText(event.item);
-        const key = event.item.id ?? `${event.item.type}:${text}`;
+        threadId = msg.result.thread.id;
+        yield { type: "init", sessionId: tagSession("codex", threadId) };
+        send(req.prompt);
+        yield { type: "input", push };
+      } else if (msg.id !== undefined && asked.has(msg.id)) {
+        asked.delete(msg.id);
+        const turn = msg.result?.turn?.id;
+        if (!turn) {
+          resultSent = true;
+          yield { type: "result", ok: false, text: msg.error?.message ?? "Codex run failed" };
+          break;
+        }
+        if (!over.has(turn)) open.add(turn);
+        else if (!asked.size && !open.size) { closed = true; break; }
+      } else if ((msg.method === "item/started" || msg.method === "item/completed") && params.item) {
+        const item = params.item;
+        if (item.type === "agentMessage") {
+          if (msg.method === "item/completed" && item.text?.trim()) {
+            finalText = item.text;
+            yield { type: "text", text: item.text };
+          }
+          continue;
+        }
+        const text = toolText(item);
+        const key = item.id ?? `${item.type}:${text}`;
         if (text && !seenTools.has(key)) {
           seenTools.add(key);
           yield { type: "tool", text };
         }
-      } else if (event.type === "turn.completed") {
+      } else if (msg.method === "thread/tokenUsage/updated") {
+        // Each model request's own usage; input already includes the cached
+        // tokens. No cost figure exists, so `usage.costUsd` stays absent.
+        const last = params.tokenUsage?.last;
+        tokens += (last?.inputTokens ?? 0) + (last?.outputTokens ?? 0);
+      } else if (msg.method === "error" && !params.willRetry) {
+        failure = params.error?.message;
+      } else if (msg.method === "turn/completed" && params.turn) {
+        open.delete(params.turn.id);
+        over.add(params.turn.id);
         resultSent = true;
-        // input_tokens already includes the cached ones; no cost figure exists
-        // here, so `usage.costUsd` stays absent rather than being invented.
-        const usage = {
-          tokens: (event.usage?.input_tokens ?? 0) + (event.usage?.output_tokens ?? 0),
-        };
-        if (req.outputSchema) {
+        const usage = { tokens };
+        tokens = 0;
+        if (params.turn.status !== "completed") {
+          yield { type: "result", ok: false, text: params.turn.error?.message ?? failure ?? "Codex run failed", usage };
+        } else if (req.outputSchema) {
           const parsed = parseStructured(finalText, "Codex");
           yield parsed.ok
-            ? {
-                type: "result",
-                ok: true,
-                text: finalText,
-                structuredOutput: parsed.value,
-                usage,
-              }
+            ? { type: "result", ok: true, text: finalText, structuredOutput: parsed.value, usage }
             : { type: "result", ok: false, text: parsed.message, usage };
         } else {
           yield { type: "result", ok: true, text: finalText, usage };
         }
-      } else if (event.type === "turn.failed" || event.type === "error") {
-        resultSent = true;
-        yield { type: "result", ok: false, text: errorText(event) };
+        failure = undefined;
+        if (!asked.size && !open.size) { closed = true; break; }
       }
     }
-
-    const status = await cli.exit;
+    closed = true;
     if (!resultSent) {
+      const status = await cli.exit;
       yield { type: "error", message: cli.failure(status, "Codex CLI was not found. Install it, run `codex login`, and restart AutoProject.") };
     }
   } finally {
+    closed = true;
     await cli.close();
   }
 }

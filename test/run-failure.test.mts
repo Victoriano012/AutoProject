@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fakeCodex } from "./fake-codex.mts";
 
 const LIMIT = "You've hit your usage limit. Try again at 3:08 AM.";
 
@@ -13,22 +14,10 @@ test("a failed run says why on the card, and Retry resends the feedback it faile
   t.mock.method(os, "homedir", () => home);
   const dir = path.join(home, "project");
   fs.mkdirSync(dir);
-  // Codex reports a usage limit as `error` + `turn.failed`, after the thread starts.
-  const prompts = path.join(home, "prompts.jsonl");
-  const cli = path.join(home, "fake-codex.cjs");
-  fs.writeFileSync(cli, `#!/usr/bin/env node
-let stdin = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => stdin += chunk);
-process.stdin.on("end", () => {
-  require("node:fs").appendFileSync(${JSON.stringify(prompts)}, JSON.stringify(stdin) + "\\n");
-  const emit = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
-  emit({ type: "thread.started", thread_id: "thread-1" });
-  emit({ type: "error", message: ${JSON.stringify(LIMIT)} });
-  emit({ type: "turn.failed", error: { message: ${JSON.stringify(LIMIT)} } });
-});`, { mode: 0o700 });
-  const previous = process.env.AUTOPROJECT_CODEX_PATH;
-  process.env.AUTOPROJECT_CODEX_PATH = cli;
+  // Codex reports a usage limit as an `error` and a failed turn, after the thread opens.
+  const sentTurns = fakeCodex(t, `
+emit("error", { error: { message: ${JSON.stringify(LIMIT)} }, willRetry: false });
+complete("failed", { message: ${JSON.stringify(LIMIT)} });`);
 
   const { writeConfig } = await import("../lib/config.ts");
   const runs = await import("../lib/server/runs.ts");
@@ -40,8 +29,6 @@ process.stdin.on("end", () => {
     runs.registry.removing.add(dir);
     await store.forget(dir);
     finishProjectRemoval(dir);
-    if (previous === undefined) delete process.env.AUTOPROJECT_CODEX_PATH;
-    else process.env.AUTOPROJECT_CODEX_PATH = previous;
     fs.rmSync(home, { recursive: true, force: true });
   });
 
@@ -53,7 +40,7 @@ process.stdin.on("end", () => {
       status: "review", workerId: "w", sessionId: "codex:thread-0", log: [] }],
   });
   const ticket = () => store.getProject(dir)!.tickets[0];
-  const sent = () => fs.readFileSync(prompts, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string);
+  const sent = () => sentTurns().map((turn) => turn.text);
 
   await runs.rejectTicket(dir, "t", "Show only the latest models");
   assert.equal(ticket().status, "error");

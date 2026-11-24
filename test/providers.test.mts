@@ -8,6 +8,7 @@ import { streamGeminiAgent } from "../lib/server/gemini.ts";
 import { createCliSession } from "../lib/server/cli-process.ts";
 import { addTicketsSchema, parsePlannedTickets, requestJsonSchema } from "../lib/board-schema.ts";
 import type { AgentEvent, AgentRequest } from "../lib/server/agent-types.ts";
+import { fakeCodex } from "./fake-codex.mts";
 
 function fixture(script: string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "autoproject-cli-"));
@@ -29,41 +30,23 @@ async function collect(events: AsyncGenerator<AgentEvent>) {
 const capture = `
 const fs = require('node:fs');
 const args = process.argv.slice(2);
-const schemaFlag = args.indexOf('--output-schema') >= 0 ? '--output-schema' : '--json-schema';
+const schemaFlag = '--json-schema';
 const schemaPath = args[args.indexOf(schemaFlag) + 1];
 const schema = args.includes(schemaFlag) ? JSON.parse(fs.readFileSync(schemaPath, 'utf8')) : undefined;
 const emit = event => process.stdout.write(JSON.stringify(event) + '\\n');
 `;
 
-test("Codex fake CLI verifies stdin, structured output, usage, deduplicated tools and temp cleanup", async () => {
-  const fixtureFiles = fixture(capture + `
-let stdin = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => stdin += chunk);
-process.stdin.on('end', () => {
-  fs.writeFileSync('captured.json', JSON.stringify({ args, schemaPath, schema, stdin }));
-  console.log('non-JSON CLI banner'); console.log('null');
-  emit({ type: 'thread.started', thread_id: 'thread-1' });
-  const item = { type: 'command_execution', id: 'tool-1', command: 'pwd' };
-  emit({ type: 'item.started', item }); emit({ type: 'item.completed', item });
-  emit({ type: 'item.completed', item: { type: 'agent_message', text: '{"tickets":[]}' } });
-  emit({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 3 } });
-});`);
-  const previous = process.env.AUTOPROJECT_CODEX_PATH;
-  process.env.AUTOPROJECT_CODEX_PATH = fixtureFiles.executable;
-  try {
-    const events = await collect(streamCodexAgent(request(fixtureFiles.dir, "gpt-6-astra", { outputSchema: requestJsonSchema })));
-    assert.deepEqual(events.map((event) => event.type), ["init", "tool", "text", "result"]);
-    assert.deepEqual(events.at(-1), { type: "result", ok: true, text: '{"tickets":[]}', structuredOutput: { tickets: [] }, usage: { tokens: 13 } });
-    const saved = JSON.parse(fs.readFileSync(path.join(fixtureFiles.dir, "captured.json"), "utf8"));
-    assert.equal(saved.stdin, "Build a cart");
-    assert.deepEqual(saved.schema, requestJsonSchema);
-    assert.equal(fs.existsSync(saved.schemaPath), false);
-  } finally {
-    if (previous === undefined) delete process.env.AUTOPROJECT_CODEX_PATH;
-    else process.env.AUTOPROJECT_CODEX_PATH = previous;
-    fixtureFiles.cleanup();
-  }
+test("Codex fake app-server: the prompt, structured output, usage and deduplicated tools", async (t) => {
+  const fixtureFiles = fixture("");
+  t.after(fixtureFiles.cleanup);
+  const sent = fakeCodex(t, `
+tool("pwd"); tool("pwd");
+say('{"tickets":[]}');
+complete();`);
+  const events = await collect(streamCodexAgent(request(fixtureFiles.dir, "gpt-6-astra", { outputSchema: requestJsonSchema })));
+  assert.deepEqual(events.map((event) => event.type), ["init", "input", "tool", "tool", "text", "result"]);
+  assert.deepEqual(events.at(-1), { type: "result", ok: true, text: '{"tickets":[]}', structuredOutput: { tickets: [] }, usage: { tokens: 13 } });
+  assert.deepEqual(sent(), [{ text: "Build a cart", outputSchema: requestJsonSchema }]);
 });
 
 test("Gemini fake CLI translates streamed text and explicit structured output", async () => {
@@ -123,22 +106,16 @@ test("CLI cancellation escalates and waits for actual exit; iterator cleanup doe
   } finally { fixtureFiles.cleanup(); }
 });
 
-test("provider iterator early return waits for child shutdown", async () => {
-  const fixtureFiles = fixture(`process.on('SIGINT', () => setTimeout(() => process.exit(0), 20)); console.log(JSON.stringify({type:'thread.started', thread_id:String(process.pid)})); setInterval(() => {}, 1000);`);
-  const previous = process.env.AUTOPROJECT_CODEX_PATH;
-  process.env.AUTOPROJECT_CODEX_PATH = fixtureFiles.executable;
-  try {
-    const events = streamCodexAgent(request(fixtureFiles.dir, "gpt-6-astra"));
-    const first = await events.next();
-    assert.equal(first.value?.type, "init");
-    const pid = Number(first.value?.type === "init" ? first.value.sessionId.replace("codex:", "") : 0);
-    await events.return(undefined);
-    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
-  } finally {
-    if (previous === undefined) delete process.env.AUTOPROJECT_CODEX_PATH;
-    else process.env.AUTOPROJECT_CODEX_PATH = previous;
-    fixtureFiles.cleanup();
-  }
+test("provider iterator early return waits for child shutdown", async (t) => {
+  const fixtureFiles = fixture("");
+  t.after(fixtureFiles.cleanup);
+  fakeCodex(t, "", `process.on("SIGINT", () => setTimeout(() => process.exit(0), 20)); reply({ thread: { id: String(process.pid) } });`);
+  const events = streamCodexAgent(request(fixtureFiles.dir, "gpt-6-astra"));
+  const first = await events.next();
+  assert.equal(first.value?.type, "init");
+  const pid = Number(first.value?.type === "init" ? first.value.sessionId.replace("codex:", "") : 0);
+  await events.return(undefined);
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
 });
 
 test("one planner schema validates all providers and generates their JSON contract", () => {

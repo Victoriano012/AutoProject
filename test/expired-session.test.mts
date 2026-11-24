@@ -10,6 +10,7 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), "autoproject-expired-"));
 mock.method(os, "homedir", () => home);
 after(() => fs.rmSync(home, { recursive: true, force: true }));
 
+const { fakeCodex } = await import("./fake-codex.mts");
 const { writeConfig } = await import("../lib/config.ts");
 const { providers } = await import("../lib/server/agent.ts");
 const { codexUpdating, streamCodexAgent, updateWhenIdle } = await import("../lib/server/codex.ts");
@@ -99,19 +100,22 @@ test("a Claude worker whose conversation expired starts a new one in the same ru
 
 test("a Codex worker whose thread is gone starts a new one in the same run", async (t) => {
   const dir = project(t, "gpt-6-astra", "codex:7c1e0a52-0000-4000-8000-000000000000");
-  // Codex 0.172 prints this on stderr and exits 1, with nothing on stdout.
-  const calls = fakeCli(t, "AUTOPROJECT_CODEX_PATH", `
-if (args[1] === "resume") {
-  process.stderr.write("Error: thread/resume: thread/resume failed: no rollout found for thread id " + args[2] + " (code -32600)\\n");
-  process.exit(1);
-}
-emit({ type: "thread.started", thread_id: "thread-new" });
-emit({ type: "item.completed", item: { type: "agent_message", text: "Made the bar yellow." } });
-emit({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 3 } });`);
+  // Codex 0.172 answers thread/resume of a thread it no longer has with this.
+  const sent = fakeCodex(t, `say("Made the bar yellow."); complete();`, `
+if (resumed) fail("no rollout found for thread id " + resumed);
+else reply({ thread: { id: "thread-new" } });`);
 
   await runs.runTicket(dir, "t");
-  const sent = calls().map(({ args, prompt }) => ({ resumed: args[1] === "resume" ? `codex:${args[2]}` : undefined, prompt }));
-  assertFreshStart(dir, sent, "codex:7c1e0a52-0000-4000-8000-000000000000", "codex:thread-new");
+  const { tickets: [ticket], workers: [worker] } = store.getProject(dir)!;
+  // The failed resume never got a prompt; the new thread got the first-ticket one.
+  assert.equal(ticket.status, "review");
+  assert.deepEqual(sent().map((s) => s.resumed), [undefined]);
+  assert.doesNotMatch(sent()[0].text, /this is a new ticket/);
+  assert.match(sent()[0].text, /## Ticket: Yellow bar/);
+  assert.equal(worker.sessionId, "codex:thread-new");
+  assert.equal(ticket.sessionId, "codex:thread-new");
+  assert.deepEqual(ticket.log.filter((e) => e.kind === "error"), []);
+  assert.equal(ticket.log.filter((e) => e.kind === "info" && /expired/.test(e.text)).length, 1);
 });
 
 test("a Gemini worker whose conversation is gone starts a new one instead of agy's silent one", async (t) => {
@@ -135,16 +139,14 @@ emit({ event: "result", result: { status: "SUCCESS", response: "Made the bar yel
 test("a Codex usage limit fails the run but keeps the worker's conversation", async (t) => {
   const dir = project(t, "gpt-6-astra", "codex:thread-old");
   const limit = "You've hit your usage limit. Try again at 3:08 AM.";
-  const calls = fakeCli(t, "AUTOPROJECT_CODEX_PATH", `
-emit({ type: "thread.started", thread_id: args[2] });
-emit({ type: "error", message: ${JSON.stringify(limit)} });
-emit({ type: "turn.failed", error: { message: ${JSON.stringify(limit)} } });
-process.exitCode = 1;`);
+  const sent = fakeCodex(t, `
+emit("error", { error: { message: ${JSON.stringify(limit)} }, willRetry: false });
+complete("failed", { message: ${JSON.stringify(limit)} });`);
 
   await runs.runTicket(dir, "t");
   const { tickets: [ticket], workers: [worker] } = store.getProject(dir)!;
   assert.equal(ticket.status, "error");
-  assert.equal(calls().length, 1);
+  assert.equal(sent().length, 1);
   assert.equal(worker.sessionId, "codex:thread-old");
   assert.equal(ticket.sessionId, "codex:thread-old");
   assert.deepEqual(ticket.log.filter((e) => e.kind === "error").map((e) => e.text), [limit]);
@@ -152,7 +154,7 @@ process.exitCode = 1;`);
 
 test("Stop ends a Codex run waiting on a Codex update at once, and the install carries on", { timeout: 5000 }, async (t) => {
   const dir = project(t, "gpt-6-astra", "codex:thread-old");
-  const calls = fakeCli(t, "AUTOPROJECT_CODEX_PATH", `emit({ type: "thread.started", thread_id: "thread-new" });`);
+  const sent = fakeCodex(t, "");
   let finish!: () => void;
   const installing = updateWhenIdle(() => new Promise<void>((done) => { finish = done; }))!;
   let reached!: () => void;
@@ -170,7 +172,7 @@ test("Stop ends a Codex run waiting on a Codex update at once, and the install c
   assert.equal(ticket.status, "todo");
   assert.equal(ticket.paused, true);
   assert.deepEqual(ticket.log.filter((e) => e.kind === "error"), []);
-  assert.throws(calls, { code: "ENOENT" }, "Codex never started");
+  assert.deepEqual(sent(), [], "Codex never started");
   assert.equal(codexUpdating(), true, "the install carries on");
   finish();
   await installing;

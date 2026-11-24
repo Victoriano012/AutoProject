@@ -39,7 +39,7 @@ export interface Registry {
    * one running first, then the ones waiting, with failed ones left in place. */
   requests: Map<string, AgentRequest[]>;
   /** Hands a message to the project agent's live turn (see AgentEvent "input"),
-   * by dir; absent while it runs on a CLI that cannot take one mid-turn. */
+   * by dir. */
   inputs: Map<string, (text: string) => boolean>;
 }
 

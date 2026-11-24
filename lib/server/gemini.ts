@@ -109,11 +109,52 @@ function toolText(toolName?: string, toolInfo?: AgyToolInfo): string | undefined
   }
 }
 
+/** Messages that cut a turn short, so the agent answers and picks its work up again. */
+const afterCut = (texts: string[]) =>
+  `The person sent this while you were working, which stopped the step you were on:\n\n${texts.join("\n\n")}\n\n` +
+  "Answer it now, then carry on with your work, redoing that step if it is still needed.";
+
+/** agy cannot take a message mid-turn, so one cuts the turn at the step in
+ * progress and the same conversation goes on with it at once. A run is cut
+ * only once agy has said its conversation (init), which then already holds the
+ * prompt. What the cut run says after the cut (its "interrupted" result, the
+ * stop) is not passed on; its finished steps are. */
+export async function* streamGeminiAgent(req: AgentRequest): AsyncGenerator<AgentEvent> {
+  const pending: string[] = [];
+  let live: AbortController | undefined;
+  let closed = false;
+  const push = (text: string): boolean => {
+    if (closed) return false;
+    pending.push(text);
+    live?.abort();
+    return true;
+  };
+  let { prompt, sessionId } = req;
+  try {
+    for (let first = true; ; first = false) {
+      const run = new AbortController();
+      for await (const ev of runAgy({ ...req, prompt, sessionId, signal: AbortSignal.any([req.signal, run.signal]) })) {
+        const cut = run.signal.aborted && !req.signal.aborted;
+        if (cut && (ev.type === "result" || ev.type === "error")) continue;
+        yield ev;
+        if (ev.type !== "init") continue;
+        sessionId = ev.sessionId;
+        live = run;
+        if (first) yield { type: "input", push };
+        if (pending.length) run.abort();
+      }
+      live = undefined;
+      if (req.signal.aborted || !pending.length) break;
+      prompt = afterCut(pending.splice(0));
+    }
+  } finally {
+    closed = true;
+  }
+}
+
 /** Antigravity CLI's stream-json mode supplies session, progress, tool, and final
  * message events while auth stays inside the local CLI environment. */
-export async function* streamGeminiAgent(
-  req: AgentRequest
-): AsyncGenerator<AgentEvent> {
+async function* runAgy(req: AgentRequest): AsyncGenerator<AgentEvent> {
   if (req.signal.aborted) { yield { type: "error", message: "Agent stopped" }; return; }
   const cli = await createCliSession(req, {
     label: "Gemini (agy)",
@@ -122,6 +163,8 @@ export async function* streamGeminiAgent(
   });
   const resumed = resumableSession(req.sessionId, req.model!)?.raw;
   let finalText = "";
+  // A step's words go out once the step is done: a cut leaves no half sentence.
+  let reply = "";
   let resultSent = false;
   const seenTools = new Set<string>();
 
@@ -142,9 +185,11 @@ export async function* streamGeminiAgent(
         };
       } else if (event.event === "step_update" && event.step_update) {
         const step = event.step_update;
-        if (step.step_type === "agent_response" && step.text_delta) {
-          finalText += step.text_delta;
-          yield { type: "text", text: step.text_delta };
+        if (step.step_type === "agent_response") {
+          finalText += step.text_delta ?? "";
+          reply += step.text_delta ?? "";
+          if (step.state === "DONE" && reply.trim()) yield { type: "text", text: reply };
+          if (step.state === "DONE") reply = "";
         } else if (step.step_type === "tool") {
           const text = toolText(step.tool_name, step.tool_info);
           const key = `${step.step_index}:${text}`;
@@ -157,6 +202,7 @@ export async function* streamGeminiAgent(
         resultSent = true;
         const res = event.result;
         if (res.status === "SUCCESS") {
+          if (reply.trim()) yield { type: "text", text: reply };
           const usage = res.usage
             ? {
                 tokens:

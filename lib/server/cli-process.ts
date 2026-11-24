@@ -10,6 +10,8 @@ interface CliOptions {
   executable: string;
   args: (schemaPath?: string) => string[];
   stdin?: string;
+  /** Keep stdin open for `send` (a JSON-RPC CLI); `close` ends it. */
+  interactive?: boolean;
   /** Production callers use the default; a short interval keeps fake CLI
    * cancellation tests fast without changing application configuration. */
   killAfterMs?: number;
@@ -83,7 +85,7 @@ export async function createCliSession(req: AgentRequest, options: CliOptions) {
   child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-8000); });
   // A process that rejects its arguments can exit before reading the prompt.
   child.stdin.on("error", () => {});
-  child.stdin.end(options.stdin);
+  if (!options.interactive) child.stdin.end(options.stdin);
   req.signal.addEventListener("abort", stop);
   if (req.signal.aborted) stop();
   const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -102,6 +104,9 @@ export async function createCliSession(req: AgentRequest, options: CliOptions) {
   return {
     events: events(),
     exit,
+    send(message: object) {
+      if (!child.stdin.writableEnded) child.stdin.write(JSON.stringify(message) + "\n");
+    },
     failure(status: ExitStatus, missingCliMessage: string): string {
       if (spawnError) return (spawnError as NodeJS.ErrnoException).code === "ENOENT" ? missingCliMessage : spawnError.message;
       if (req.signal.aborted) return "Agent stopped";
@@ -109,6 +114,7 @@ export async function createCliSession(req: AgentRequest, options: CliOptions) {
     },
     async close() {
       req.signal.removeEventListener("abort", stop);
+      if (!child.stdin.writableEnded) child.stdin.end();
       stop();
       await exit;
       lines.close();
