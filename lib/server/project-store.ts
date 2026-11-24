@@ -236,10 +236,21 @@ export function addTickets(dir: string, tickets: PlannedTicket[]): Ticket[] {
 /** A worker's conversation moved on (its agent reached init on a ticket), or
  * is gone (undefined: the CLI no longer has it). */
 export function setWorkerSession(dir: string, workerId: string, sessionId: string | undefined): void {
-  const e = entry(dir);
-  const w = e?.project.workers.find((x) => x.id === workerId);
-  if (!e || !w || w.sessionId === sessionId) return;
-  const workers = e.project.workers.map((x) => (x === w ? { ...x, sessionId } : x));
+  const w = entry(dir)?.project.workers.find((x) => x.id === workerId);
+  if (!w || w.sessionId === sessionId) return;
+  patchWorker(dir, workerId, { sessionId, contextTokens: undefined });
+}
+
+/** How big the worker's conversation is after its last turn. */
+export function setWorkerContext(dir: string, workerId: string, contextTokens: number): void {
+  const w = entry(dir)?.project.workers.find((x) => x.id === workerId);
+  if (!w || w.contextTokens === contextTokens) return;
+  patchWorker(dir, workerId, { contextTokens });
+}
+
+function patchWorker(dir: string, workerId: string, patch: Partial<Worker>): void {
+  const e = entry(dir)!;
+  const workers = e.project.workers.map((x) => (x.id === workerId ? { ...x, ...patch } : x));
   e.project = { ...e.project, workers };
   scheduleWrite(dir, e);
   publish(dir, { type: "workers", workers });

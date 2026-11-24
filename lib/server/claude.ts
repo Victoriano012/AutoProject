@@ -142,6 +142,8 @@ export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<Agen
   // until the session is live and keep process abort as the backstop.
   let live = false;
   let sent = false;
+  // What the next turn on this conversation starts by re-reading.
+  let contextTokens: number | undefined;
   const interrupt = () => {
     if (!live || sent) return;
     sent = true;
@@ -170,6 +172,10 @@ export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<Agen
         };
       } else if (msg.type === "assistant") {
         const sub = msg.parent_tool_use_id !== null;
+        const u = msg.message.usage;
+        if (!sub && u) {
+          contextTokens = u.input_tokens + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+        }
         for (const block of msg.message.content) {
           if (block.type === "text" && block.text.trim()) {
             yield { type: "text", text: block.text, ...(sub && { sub }) };
@@ -205,7 +211,7 @@ export async function* streamClaudeAgent(req: AgentRequest): AsyncGenerator<Agen
         // modelUsage is the SDK's own accounting field (main loop, subagents
         // and internal calls), cumulative over this query() call, so the last
         // result message carries the whole session.
-        const usage = claudeUsage(msg.modelUsage);
+        const usage = { ...claudeUsage(msg.modelUsage), contextTokens };
         yield msg.subtype === "success"
           ? {
               type: "result",

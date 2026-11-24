@@ -84,8 +84,11 @@ export interface Worker {
   n: number;
   /** Its area of the codebase or kind of work, briefly — not any one ticket. */
   description: string;
-  /** Its conversation; every ticket assigned to it resumes this. */
+  /** Its conversation; the tickets assigned to it resume this until it grows
+   * too big (see `startingSession`). */
   sessionId?: string;
+  /** Tokens that conversation held after its last turn. */
+  contextTokens?: number;
 }
 
 /** How the planner names a ticket's worker: an existing one by number, or a

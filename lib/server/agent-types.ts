@@ -8,6 +8,8 @@ import type { ReasoningEffort } from "../models";
 export interface RunUsage {
   tokens: number;
   costUsd?: number;
+  /** The conversation's size after the last main-agent turn. */
+  contextTokens?: number;
 }
 
 /** One agent turn, as the ticket runner consumes it. */

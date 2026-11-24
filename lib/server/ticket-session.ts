@@ -1,4 +1,4 @@
-import { type Attachment, type Ticket } from "../types";
+import { type Attachment, type Ticket, type Worker } from "../types";
 import { resumableSession, providerForModel } from "./model-settings";
 import { selectedModel } from "../config";
 import { addStats } from "../stats";
@@ -29,6 +29,11 @@ function abortText(key: string): string {
 
 const ticketOf = (dir: string, id: string): Ticket | undefined =>
   store.getProject(dir)?.tickets.find((t) => t.id === id);
+
+const workerOf = (dir: string, id: string): Worker | undefined => {
+  const workerId = ticketOf(dir, id)?.workerId;
+  return store.getProject(dir)?.workers.find((w) => w.id === workerId);
+};
 
 // ---- what the work cost ---------------------------------------------------
 
@@ -65,8 +70,7 @@ const MISSING_SESSION = /No conversation found with session ID/;
  * neither resumes it again; the new conversation's init fills them back in. */
 function forgetSession(dir: string, ticketId: string, sessionId: string): void {
   store.updateTicket(dir, ticketId, (t) => (t.sessionId === sessionId ? { ...t, sessionId: undefined } : t));
-  const workerId = ticketOf(dir, ticketId)?.workerId;
-  const worker = store.getProject(dir)?.workers.find((w) => w.id === workerId);
+  const worker = workerOf(dir, ticketId);
   if (worker?.sessionId === sessionId) store.setWorkerSession(dir, worker.id, undefined);
 }
 
@@ -114,9 +118,12 @@ async function runAgentSession(
       for await (const ev of events) {
         if (ev.type === "init") {
           store.updateTicket(dir, ticketId, (t) => ({ ...t, sessionId: ev.sessionId }));
-          // The worker's conversation is what its next ticket resumes.
-          const workerId = ticketOf(dir, ticketId)?.workerId;
-          if (workerId) store.setWorkerSession(dir, workerId, ev.sessionId);
+          // The worker's conversation is what its next ticket resumes — unless
+          // this is feedback on a ticket from a conversation it has moved on from.
+          const worker = workerOf(dir, ticketId);
+          if (worker && (!sessionId || sessionId === worker.sessionId)) {
+            store.setWorkerSession(dir, worker.id, ev.sessionId);
+          }
         } else if (ev.type === "text") {
           store.appendLog(dir, ticketId, { kind: "text", text: ev.text, ts: Date.now() });
         } else if (ev.type === "tool") {
@@ -125,6 +132,10 @@ async function runAgentSession(
           ok = ev.ok;
           finalText = ev.text ?? "";
           usage = ev.usage;
+          const worker = workerOf(dir, ticketId);
+          if (usage?.contextTokens !== undefined && worker?.sessionId && worker.sessionId === ticketOf(dir, ticketId)?.sessionId) {
+            store.setWorkerContext(dir, worker.id, usage.contextTokens);
+          }
         } else if (ev.type === "error") {
           // Claude Code deletes transcripts older than cleanupPeriodDays, so a
           // worker idle that long has no conversation left to resume.

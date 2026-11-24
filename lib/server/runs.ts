@@ -14,7 +14,7 @@ import * as store from "./project-store";
 import { registry, ticketKey } from "./run-registry";
 export { registry } from "./run-registry";
 import { createBoardIndex } from "../board-index";
-import { inheritedAttachments, workerOf, ticketPrompt } from "./ticket-prompt";
+import { inheritedAttachments, startingSession, workerOf, ticketPrompt } from "./ticket-prompt";
 import { runWithNotes } from "./ticket-session";
 export { ticketPrompt } from "./ticket-prompt";
 
@@ -126,12 +126,23 @@ async function runTicketOnce(dir: string, ticketId: string): Promise<void> {
   store.appendLog(dir, ticketId, { kind: "user", text: prompt, ts: Date.now() });
 
   const model = selectedModel();
+  const worker = workerOf(project, ticket);
+  const session = startingSession(project, ticket);
+  if (worker?.sessionId && !session) {
+    store.appendLog(dir, ticketId, {
+      kind: "info",
+      text:
+        `Worker #${worker.n} started a new conversation` +
+        (worker.contextTokens ? `; its last one held ${Math.round(worker.contextTokens / 1000)}k tokens.` : "."),
+      ts: Date.now(),
+    });
+  }
   const { ok, text, aborted } = await runWithNotes(dir, ticketId, {
     prompt,
     // The worker's conversation, so it keeps what its earlier tickets taught it.
-    sessionId: resumableSession(workerOf(project, ticket)?.sessionId, model)?.stored,
+    sessionId: resumableSession(session, model)?.stored,
     // Asked once that conversation is forgotten, so it claims no earlier tickets.
-    freshPrompt: () => ticketPrompt(store.getProject(dir) ?? project, ticket),
+    freshPrompt: () => ticketPrompt(store.getProject(dir) ?? project, ticket, true),
     attachments: inheritedAttachments(project, ticket),
     model,
   });
@@ -185,11 +196,10 @@ export function noteTicket(dir: string, ticketId: string, message: string): void
   registry.controllers.get(key)?.abort();
 }
 
-/** The session a ticket's feedback resumes: its worker's — one conversation
- * for all of that worker's tickets — or, for a ticket from before workers, its
- * own. */
+/** The session a ticket's feedback resumes: the one it ran in, or for a ticket
+ * that never ran, the one its worker would start it in. */
 const sessionFor = (project: Project, ticket: Ticket): string | undefined =>
-  workerOf(project, ticket)?.sessionId ?? ticket.sessionId;
+  ticket.sessionId ?? startingSession(project, ticket);
 
 /** Runtime claims outlive card edits/deletion and are released only after the
  * complete run has unwound, including any resumed notes. */
@@ -315,7 +325,7 @@ async function sendFeedbackNow(
     sessionId: activeSession,
     // That conversation is gone: a new one reads the ticket first.
     freshPrompt: () =>
-      `${ticketPrompt(store.getProject(dir) ?? project, ticket)}\n\n` +
+      `${ticketPrompt(store.getProject(dir) ?? project, ticket, true)}\n\n` +
       (opening
         ? "The human is starting this ticket with a request"
         : "Earlier work on this ticket is already in the workspace. Human review feedback on it") +
