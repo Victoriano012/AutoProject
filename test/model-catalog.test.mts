@@ -405,20 +405,36 @@ test("Settings offers only the newest of each family, without Flash, and a futur
     return withSelectedModel(catalogModels(catalog), "claude-opus-5", knownModels(catalog)).map((m) => `${m.value}=${m.label}`);
   };
   assert.deepEqual(await shown(), [
-    "opus=Opus 5.5", "sonnet=Sonnet 5.5", "fable=Fable 5.2", "haiku=Haiku 5.5",
+    "fable=Fable 5.2", "opus=Opus 5.5", "sonnet=Sonnet 5.5", "haiku=Haiku 5.5",
     "gpt-6.2-sol=Sol 6.2", "gpt-6.2-astra=Astra 6.2", "gpt-6.1-terra=Terra 6.1", "gpt-6-luna=Luna 6",
     "gemini-4-hydrogen-high=Hydrogen 4",
     "claude-opus-5=Opus 5 (saved selection)",
   ]);
   released = true;
   assert.deepEqual(await shown(), [
-    "opus=Opus 5.6", "sonnet=Sonnet 5.5", "fable=Fable 5.2", "haiku=Haiku 5.5",
+    "fable=Fable 5.2", "opus=Opus 5.6", "sonnet=Sonnet 5.5", "haiku=Haiku 5.5",
     "gpt-6.2-sol=Sol 6.2", "gpt-6.2-astra=Astra 6.2", "gpt-6.1-terra=Terra 6.1", "gpt-6.3-luna=Luna 6.3",
     "gemini-4.1-hydrogen-high=Hydrogen 4.1", "gemini-4-argon-high=Argon 4",
     "claude-opus-5=Opus 5 (saved selection)",
   ]);
   // Flash is gone from the bundled fallback too, not just from discovery.
   assert.ok(!catalogModels(createModelCatalog({ file: () => path.join(dir, "none.json"), discover }).read()).some((m) => /Flash/.test(m.label)));
+});
+
+test("Claude is listed Fable, Opus, Sonnet, Haiku, then other families, whatever order discovery gives", async (t) => {
+  const dir = fixture(t);
+  const discover = async (provider: string): Promise<Discovery> => {
+    if (provider !== "claude") throw new DiscoveryError("is not installed");
+    return { models: parseClaudeModels([
+      claudeRow("mythos", "Mythos 1"), claudeRow("haiku", "Haiku 5.5"), claudeRow("sonnet", "Sonnet 5.5"),
+      claudeRow("opus", "Opus 5.5"), claudeRow("claude-fable-5-1", "Fable 5.1"), claudeRow("fable", "Fable 5.2"),
+    ] as never) };
+  };
+  const catalog = await createModelCatalog({ file: () => path.join(dir, "catalog.json"), discover }).refresh();
+  const claude = (models: readonly ModelChoice[]) => models.filter((m) => m.provider === "claude").map((m) => m.label);
+  assert.deepEqual(claude(catalogModels(catalog)), ["Fable 5.2", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5", "Mythos 1"]);
+  // The bundled list Settings falls back on when /api/models fails.
+  assert.deepEqual(claude(offeredModels(MODEL_CHOICES)), ["Fable 5.1", "Opus 5", "Sonnet 5", "Haiku 4.5"]);
 });
 
 test("every press of Refresh asks every tool again, even after one failed", async (t) => {

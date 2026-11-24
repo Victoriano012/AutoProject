@@ -155,11 +155,23 @@ export function latestPerFamily(models: readonly ModelChoice[]): ModelChoice[] {
   return [...latest.values()].map(({ model }) => model);
 }
 
+/** Claude families by tier, most powerful first. Any other Claude family
+ * follows, in the order the tool gave. */
+const CLAUDE_TIERS = ["fable", "opus", "sonnet", "haiku"];
+
+function claudeTier({ label }: ModelChoice): number {
+  const tier = CLAUDE_TIERS.indexOf(familyVersion(label)?.family ?? label.toLowerCase());
+  return tier < 0 ? CLAUDE_TIERS.length : tier;
+}
+
 /** What Settings offers, from discovery or the bundled fallback alike. Gemini
  * Flash, in every variant, is left out at the person's request; a saved one
- * still runs. */
+ * still runs. Claude is listed by tier, whatever order or version the tool
+ * reports; other providers keep the tool's order. */
 export function offeredModels(models: readonly ModelChoice[]): ModelChoice[] {
-  return latestPerFamily(models).filter((m) => !(m.provider === "gemini" && /\bflash\b/i.test(`${m.label} ${m.value}`)));
+  const offered = latestPerFamily(models).filter((m) => !(m.provider === "gemini" && /\bflash\b/i.test(`${m.label} ${m.value}`)));
+  const claude = offered.filter((m) => m.provider === "claude").sort((a, b) => claudeTier(a) - claudeTier(b));
+  return offered.map((m) => (m.provider === "claude" ? claude.shift()! : m));
 }
 
 /** Claude's CLI aliases carry no provider prefix, so a saved `opus` would fall
