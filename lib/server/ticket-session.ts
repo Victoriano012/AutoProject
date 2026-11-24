@@ -63,8 +63,9 @@ function recordRun(dir: string, ticketId: string, ms: number, usage?: RunUsage):
 
 // ---- one agent session ----------------------------------------------------
 
-/** The Claude Code CLI's answer to resuming a conversation it no longer has. */
-const MISSING_SESSION = /No conversation found with session ID/;
+/** Each CLI's answer to resuming a conversation it no longer has: Claude Code's,
+ * Codex's, and the one gemini.ts gives for agy, which silently starts anew. */
+const MISSING_SESSION = /No conversation found with session ID|no rollout found for thread id|conversation "[^"]*" not found/;
 
 /** Drop a conversation the CLI no longer has from the ticket and its worker, so
  * neither resumes it again; the new conversation's init fills them back in. */
@@ -137,8 +138,8 @@ async function runAgentSession(
             store.setWorkerContext(dir, worker.id, usage.contextTokens);
           }
         } else if (ev.type === "error") {
-          // Claude Code deletes transcripts older than cleanupPeriodDays, so a
-          // worker idle that long has no conversation left to resume.
+          // A worker idle long enough has no conversation left to resume (Claude
+          // Code deletes transcripts older than cleanupPeriodDays).
           if (sessionId && body.freshPrompt && MISSING_SESSION.test(ev.message) && !ctrl.signal.aborted) {
             expired = true;
             continue;

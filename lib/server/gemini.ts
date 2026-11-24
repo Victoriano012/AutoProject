@@ -120,6 +120,7 @@ export async function* streamGeminiAgent(
     executable: process.env.AUTOPROJECT_AGY_PATH?.trim() || process.env.AUTOPROJECT_GEMINI_PATH?.trim() || "agy",
     args: (schemaPath) => [...geminiArgs(req, schemaPath), "--print", req.prompt],
   });
+  const resumed = resumableSession(req.sessionId, req.model!)?.raw;
   let finalText = "";
   let resultSent = false;
   const seenTools = new Set<string>();
@@ -129,6 +130,12 @@ export async function* streamGeminiAgent(
       const event = raw as AgyEvent;
 
       if (event.event === "init" && event.conversation_id) {
+        // agy answers a conversation it no longer has by starting a new one,
+        // with only a stderr warning: stop it rather than pass it off as the old.
+        if (resumed && event.conversation_id !== resumed) {
+          yield { type: "error", message: `Antigravity CLI: conversation "${resumed}" not found` };
+          return;
+        }
         yield {
           type: "init",
           sessionId: tagSession("gemini", event.conversation_id),
