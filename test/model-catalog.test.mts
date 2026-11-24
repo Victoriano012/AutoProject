@@ -5,8 +5,9 @@ import path from "node:path";
 import test from "node:test";
 import { createModelCatalog, catalogModels, knownModels } from "../lib/server/model-catalog.ts";
 import { DiscoveryError } from "../lib/server/discovery-error.ts";
-import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverCurrentCodex, discoverGemini, type Discovery } from "../lib/server/model-discovery.ts";
-import { latestPerFamily, MODEL_CHOICES, normalizeModelLabel, providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
+import { parseCodexModels, parseClaudeModels, parseGeminiModels, discoverCodex, discoverGemini, updateCodex, type Discovery } from "../lib/server/model-discovery.ts";
+import { holdCodex } from "../lib/server/codex.ts";
+import { latestPerFamily, modelChoice, MODEL_CHOICES, offeredModels, normalizeModelLabel, providerForModel, reasoningEffortsForModel, resolveReasoningEffort, withSelectedModel, type ModelChoice } from "../lib/models.ts";
 
 function setEnv(t: test.TestContext, key: string, value: string) {
   const previous = process.env[key];
@@ -88,6 +89,21 @@ test("only the newest release of each family is offered, and a hidden one stays 
     { value: "gemini-6-sol-high", label: "Sol 6", provider: "gemini", reasoningEfforts: [] },
   ];
   assert.deepEqual(latestPerFamily(tricky).map((m) => m.value), ["gpt-6.2-astra", "gpt-6.10-sol", "gemini-6-sol-high"]);
+  // Names the label pass cannot tidy still meet their family: any case, a
+  // version anywhere, a date or build stamp, a vendor word and nothing else.
+  const odd = parseCodexModels([
+    { model: "gpt-6.2", displayName: "GPT-6.2" }, { model: "gpt-6.1", displayName: "GPT-6.1" }, { model: "gpt-6", displayName: "gpt-6" },
+    { model: "gpt-6.1-sol-1029", displayName: "GPT-6.1-Sol-1029" }, { model: "gpt-6.2-sol", displayName: "Sol 6.2" },
+    { model: "gpt-6.1-sol-2025-10-29", displayName: "GPT-6.1-Sol-2025-10-29" },
+    { model: "codex-max-6.2", displayName: "Codex Max 6.2" }, { model: "codex-max-6.1", displayName: "codex max 6.1" },
+    { model: "gpt-6.3-codex-max-0102", displayName: "gpt-6.3-codex-max-0102" },
+  ]);
+  assert.deepEqual(latestPerFamily(odd).map((m) => m.value), ["gpt-6.2", "gpt-6.2-sol", "gpt-6.3-codex-max-0102"]);
+  const haiku = parseClaudeModels([
+    { value: "claude-haiku-4-5-20251001", displayName: "claude-haiku-4-5-20251001", description: "" },
+    { value: "haiku", displayName: "Haiku 5.5", description: "" },
+  ]);
+  assert.deepEqual(latestPerFamily(haiku).map((m) => m.value), ["haiku"]);
   // A superseded model someone already picked must remain visible and routable.
   const listed = withSelectedModel(latestPerFamily(codex), "gpt-5.6-sol", codex);
   assert.deepEqual(listed.at(-1), { value: "gpt-5.6-sol", label: "Sol 5.6 (saved selection)", provider: "codex", reasoningEfforts: [], defaultReasoningEffort: undefined });
@@ -111,6 +127,37 @@ test("every agy reasoning variant folds into one entry, including ones added lat
   assert.equal(hydrogen.reasoningModels?.xhigh, "gemini-4-hydrogen-xhigh");
   assert.deepEqual(rest.map((m) => [m.value, m.label, m.reasoningEfforts.length]), [
     ["gemini-3.8-flash-high", "Flash 3.8", 3], ["gemini-4-ultra", "Ultra 4", 0]]);
+});
+
+test("no Gemini Flash variant is offered, from discovery or the bundled fallback", () => {
+  const gemini = parseGeminiModels([
+    "gemini-3.9-flash-high\tGemini 3.9 Flash (High)", "gemini-3.9-flash-lite-high\tGemini 3.9 Flash-Lite (High)",
+    "gemini-3.9-flash-image\tGemini 3.9 Flash Image", "gemini-4-pro-high\tGemini 4 Pro (High)",
+  ].join("\n"));
+  assert.deepEqual(offeredModels(gemini).map((m) => m.label), ["Pro 4"]);
+  // What Settings shows before, or without, an answer from the server.
+  assert.ok(MODEL_CHOICES.some((m) => /Flash/.test(m.label)));
+  assert.deepEqual(offeredModels(MODEL_CHOICES).filter((m) => m.provider === "gemini").map((m) => m.label), ["Pro 3.1"]);
+});
+
+test("a stale cache's standalone xhigh entry cannot hide the folded entry's levels", (t) => {
+  const dir = fixture(t);
+  const file = path.join(dir, "catalog.json");
+  const hydrogen = parseGeminiModels(AGY_OUTPUT)[0];
+  // Shaped like ~/.autoproject/model-catalog.json on 2026-11-24: the old parser
+  // stored -xhigh as a model of its own, and the history still has it.
+  const stale = { value: "gemini-4-hydrogen-xhigh", label: "Hydrogen 4", provider: "gemini", reasoningEfforts: [] };
+  fs.writeFileSync(file, JSON.stringify({ version: 1, checkedAt: 1, retained: [hydrogen, stale], providers: {
+    claude: { models: [], source: "bundled" }, codex: { models: [], source: "bundled" },
+    gemini: { models: [hydrogen], source: "discovered", lastSuccessAt: 1 } } }));
+  const catalog = createModelCatalog({ file: () => file, discover: async () => ({ models: [] }) }).read();
+  const known = knownModels(catalog);
+  assert.ok(known.some((m) => m.value === stale.value), "the stale entry is really there");
+  assert.equal(modelChoice(stale.value, known)?.value, "gemini-4-hydrogen-high");
+  assert.deepEqual(reasoningEffortsForModel(stale.value, known), ["low", "medium", "high", "xhigh"]);
+  assert.equal(resolveReasoningEffort(stale.value, undefined, known), "xhigh");
+  const saved = withSelectedModel(catalogModels(catalog), stale.value, known).at(-1);
+  assert.deepEqual([saved?.value, saved?.reasoningEfforts], [stale.value, ["low", "medium", "high", "xhigh"]]);
 });
 
 test("reads never discover, refreshes always do and coalesce, and partial successes persist", async (t) => {
@@ -393,30 +440,87 @@ test("every press of Refresh asks every tool again, even after one failed", asyn
   }
 });
 
-test("a refresh updates a Codex that is behind the latest release before asking it", async (t) => {
+/** A Codex whose `update` takes `delay` ms to install 0.172.0, saying "installing"
+ * meanwhile. Before that its app-server dies on start, and "broken" makes
+ * `--version` fail too. */
+function fakeCodex(t: test.TestContext, version: string, delay = 0) {
   const dir = fixture(t);
   const executable = path.join(dir, "codex");
-  const installed = path.join(dir, "version");
-  fs.writeFileSync(installed, "0.160.0");
+  const state = path.join(dir, "version");
+  fs.writeFileSync(state, version);
   fs.writeFileSync(executable, `#!/usr/bin/env node
 const fs = require('node:fs');
-if (process.argv[2] === 'update') { fs.writeFileSync(${JSON.stringify(installed)}, '0.172.0'); process.exit(0); }
-const version = fs.readFileSync(${JSON.stringify(installed)}, 'utf8');
-require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+const version = fs.readFileSync(${JSON.stringify(state)}, 'utf8');
+if (process.argv[2] === 'update') { fs.writeFileSync(${JSON.stringify(state)}, 'installing'); setTimeout(() => fs.writeFileSync(${JSON.stringify(state)}, '0.172.0'), ${delay}); }
+else if (process.argv[2] === '--version') { if (version === 'broken') process.exit(1); console.log('codex-cli ' + version); }
+else if (version !== '0.172.0') process.exit(1);
+else require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
   const req = JSON.parse(line);
-  if (req.method === 'initialize') console.log(JSON.stringify({ id: req.id, result: { userAgent: 'autoproject/' + version + ' (Mac OS)' } }));
-  if (req.method === 'model/list') console.log(JSON.stringify({ id: req.id, result: { data: [{ model: version === '0.172.0' ? 'gpt-6.2-sol' : 'gpt-6.1-sol' }], nextCursor: null } }));
+  if (req.method === 'initialize') console.log(JSON.stringify({ id: req.id, result: { userAgent: 'autoproject/0.172.0 (Mac OS)' } }));
+  if (req.method === 'model/list') console.log(JSON.stringify({ id: req.id, result: { data: [{ model: 'gpt-6.2-sol', displayName: 'GPT-6.2-Sol' }], nextCursor: null } }));
 });
 `, { mode: 0o700 });
   setEnv(t, "AUTOPROJECT_CODEX_PATH", executable);
-  // Up to date (or npm unreachable): asked once, never updated.
-  for (const latest of [async () => "0.160.0", async () => { throw new Error("offline"); }]) {
-    assert.deepEqual((await discoverCurrentCodex(latest)).models.map((m) => m.value), ["gpt-6.1-sol"]);
-    assert.equal(fs.readFileSync(installed, "utf8"), "0.160.0");
+  return () => fs.readFileSync(state, "utf8");
+}
+
+test("an outdated Codex is updated even when it cannot list its models or say its version", async (t) => {
+  const latest = async () => "0.172.0";
+  for (const start of ["0.160.0", "broken"]) {
+    const installed = fakeCodex(t, start);
+    await assert.rejects(discoverCodex(5000), /stopped before answering/);
+    assert.equal(await updateCodex(latest), "0.172.0");
+    assert.deepEqual((await discoverCodex(5000)).models.map((m) => m.value), ["gpt-6.2-sol"]);
+    assert.equal(installed(), "0.172.0");
   }
-  const found = await discoverCurrentCodex(async () => "0.172.0");
-  assert.equal(found.version, "0.172.0");
-  assert.deepEqual(found.models.map((m) => m.value), ["gpt-6.2-sol"]);
+  // Already current, or npm unreachable: nothing is installed.
+  assert.equal(await updateCodex(latest), undefined);
+  const installed = fakeCodex(t, "0.160.0");
+  assert.equal(await updateCodex(async () => { throw new Error("offline"); }), undefined);
+  assert.equal(installed(), "0.160.0");
+});
+
+test("Codex is never updated under a run, and a run never starts on a half-installed one", async (t) => {
+  const installed = fakeCodex(t, "0.160.0", 300);
+  const latest = async () => "0.172.0";
+  const release = await holdCodex();
+  assert.equal(await updateCodex(latest), undefined, "a run is going: no update");
+  assert.equal(installed(), "0.160.0");
+  release();
+  const updating = updateCodex(latest);
+  while (installed() !== "installing") await new Promise((r) => setTimeout(r, 20));
+  // A refresh mid-install answers at once rather than waiting for it.
+  const { discoverers } = await import("../lib/server/model-discovery.ts");
+  await assert.rejects(discoverers.codex(), /is updating/);
+  assert.equal(installed(), "installing");
+  // A run asked for mid-install starts only once the install is complete.
+  const run = await holdCodex();
+  run();
+  assert.equal(installed(), "0.172.0");
+  assert.equal(await updating, "0.172.0");
+});
+
+test("a refresh answers without waiting on a Codex update, whose models then land by themselves", async (t) => {
+  const home = fixture(t);
+  t.mock.method(os, "homedir", () => home);
+  t.mock.method(globalThis, "fetch", async () => Response.json({ version: "0.172.0" }));
+  fakeCodex(t, "0.160.0", 1500);
+  const { discoverers } = await import("../lib/server/model-discovery.ts");
+  for (const provider of ["claude", "gemini"] as const) {
+    t.mock.method(discoverers, provider, async () => ({ models: [{ value: `${provider}-model`, label: "Model", provider, reasoningEfforts: [] }] }));
+  }
+  const { POST, GET } = await import("../app/api/models/route.ts");
+  const started = Date.now();
+  const first = await (await POST()).json();
+  assert.ok(Date.now() - started < 1500, "Claude and Gemini did not wait for the install");
+  assert.equal(first.providers.codex.error, "stopped before answering");
+  assert.equal(first.models.find((m: ModelChoice) => m.provider === "claude")?.value, "claude-model");
+  let codex: ModelChoice[] = [];
+  for (let i = 0; i < 100 && !codex.length; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    codex = (await (await GET()).json()).models.filter((m: ModelChoice) => m.provider === "codex" && m.value === "gpt-6.2-sol");
+  }
+  assert.equal(codex.length, 1, "the updated Codex's models arrive without another press");
 });
 
 test("Claude runs the person's own, self-updating CLI when there is one", async (t) => {

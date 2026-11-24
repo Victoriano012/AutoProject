@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DiscoveryError, discoveryReason } from "./discovery-error";
 import type { Discovery } from "./model-discovery";
-import { latestPerFamily, MODEL_CHOICES, REASONING_LABELS, type ModelChoice, type ModelProvider } from "../models";
+import { MODEL_CHOICES, offeredModels, REASONING_LABELS, type ModelChoice, type ModelProvider } from "../models";
 
 const PROVIDERS: ModelProvider[] = ["claude", "codex", "gemini"];
 export interface ProviderCatalog {
@@ -42,12 +42,9 @@ function defaults(): ModelCatalog {
 
 const reported = (catalog: ModelCatalog) => PROVIDERS.flatMap((p) => catalog.providers[p].models);
 
-/** What Settings offers. The cache keeps everything the tools reported, so this
- * applies to old snapshots too. Gemini Flash is left out at the person's
- * request; a saved one still runs through `knownModels`. */
-export function catalogModels(catalog: ModelCatalog): ModelChoice[] {
-  return latestPerFamily(reported(catalog)).filter((m) => !(m.provider === "gemini" && /^Flash \d/.test(m.label)));
-}
+/** What Settings offers. The cache keeps everything the tools reported, so the
+ * rule applies to old snapshots too; hidden models still run via `knownModels`. */
+export const catalogModels = (catalog: ModelCatalog): ModelChoice[] => offeredModels(reported(catalog));
 
 export function knownModels(catalog: ModelCatalog): ModelChoice[] {
   // Current capabilities override historical and bundled metadata, including [].

@@ -6,6 +6,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_REASONING_EFFORT,
   MODEL_CHOICES,
+  offeredModels,
   withSelectedModel,
   type ModelChoice,
   REASONING_LABELS,
@@ -62,7 +63,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [showStats, setShowStats] = useState(false);
-  const [catalog, setCatalog] = useState<readonly ModelChoice[]>(MODEL_CHOICES);
+  const [catalog, setCatalog] = useState<readonly ModelChoice[]>(() => offeredModels(MODEL_CHOICES));
   const [refreshing, setRefreshing] = useState(false);
   const [catalogMessage, setCatalogMessage] = useState<string[]>([]);
   const [tools, setTools] = useState("");

@@ -2,6 +2,7 @@ import { spawn, execFile } from "node:child_process";
 import os from "node:os";
 import { query, type ModelInfo, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { claudeExecutable } from "./claude";
+import { codexUpdating, holdCodex, updateWhenIdle } from "./codex";
 import { DiscoveryError } from "./discovery-error";
 import { newer, normalizeChoice, normalizeModelLabel, REASONING_LABELS, type ModelChoice, type ModelProvider, type ReasoningEffort } from "../models";
 
@@ -191,16 +192,49 @@ export async function discoverGemini(timeoutMs = DISCOVERY_TIMEOUT_MS): Promise<
 
 const latestCodex = async (): Promise<string> => (await (await fetch("https://registry.npmjs.org/@openai/codex/latest",
   { signal: AbortSignal.timeout(5000) })).json()).version;
+const codexVersion = () => run(codexPath(), ["--version"], DISCOVERY_TIMEOUT_MS)
+  .then((out) => /\d+(?:\.\d+)+/.exec(out)?.[0], () => undefined);
 
 /** Codex offers a model only to a CLI new enough for it, and an npm install
- * never updates itself (its own check runs in the TUI alone). A refresh is when
- * someone wants the newest models, so Codex is updated first when it is behind
- * the latest release. Any failure keeps what the installed CLI reported. */
-export async function discoverCurrentCodex(latest = latestCodex): Promise<Discovery> {
-  const [found, release] = await Promise.all([discoverCodex(), latest().catch(() => undefined)]);
-  if (!release || !found.version || !newer(release, found.version)) return found;
-  await run(codexPath(), ["update"], 120_000).catch(() => {});
-  return discoverCodex().catch(() => found);
+ * never updates itself (its own check runs in the TUI alone). So `codex update`
+ * runs when npm has a newer release, or when the CLI cannot even say its
+ * version, whether or not it answered for its models. The install runs in its
+ * own process group with no timeout: a killed one would leave Codex broken.
+ * Resolves to the version now installed when that changed. */
+export async function updateCodex(latest = latestCodex): Promise<string | undefined> {
+  const [installed, release] = await Promise.all([codexVersion(), latest().catch(() => undefined)]);
+  if (!release || (installed && !newer(release, installed))) return;
+  return updateWhenIdle(async () => {
+    await new Promise((done) => spawn(/* turbopackIgnore: true */ codexPath(), ["update"], {
+      cwd: os.homedir(), env: process.env, stdio: "ignore", detached: true,
+    }).on("close", done).on("error", done));
+    const now = await codexVersion();
+    return now !== installed ? now : undefined;
+  });
+}
+
+let lastCodexCheck = 0;
+
+async function discoverCurrentCodex(): Promise<Discovery> {
+  // Waiting on the install would hold up Claude and Gemini too: say so instead.
+  if (codexUpdating()) throw new DiscoveryError("is updating; refresh again in a minute");
+  const release = await holdCodex();
+  try { return await discoverCodex(); }
+  finally {
+    release();
+    // Not awaited: Claude and Gemini answer without waiting on an install, and
+    // the new Codex's models are stored once it lands. npm is asked at most once
+    // a minute, which also keeps that follow-up refresh from asking again.
+    if (Date.now() - lastCodexCheck > 60_000) {
+      lastCodexCheck = Date.now();
+      void updateCodex().then(async (version) => {
+        if (!version) return;
+        // A refresh still in flight read Codex before the install: run another.
+        const { modelCatalog } = await import("./model-catalog");
+        if ((await modelCatalog.refresh()).providers.codex.version !== version) await modelCatalog.refresh();
+      }).catch(() => {});
+    }
+  }
 }
 
 export const discoverers: Record<ModelProvider, () => Promise<Discovery>> = {

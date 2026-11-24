@@ -73,12 +73,41 @@ function toolText(item: CodexItem): string | undefined {
   if (item.type === "plan") return "Update plan";
 }
 
+/** Runs and discovery hold the Codex CLI while they use it. An update starts
+ * only when nothing holds it, and whoever arrives meanwhile waits for it (ten
+ * minutes at most, should an install hang), so no run starts on a half-installed
+ * Codex. On globalThis: runs and refreshes are served by different route bundles. */
+const codexUse = ((globalThis as { autoProjectCodex?: { holders: number; update?: Promise<void> } })
+  .autoProjectCodex ??= { holders: 0 });
+
+export const codexUpdating = () => Boolean(codexUse.update);
+
+export async function holdCodex(): Promise<() => void> {
+  while (codexUse.update) await codexUse.update;
+  codexUse.holders++;
+  return () => { codexUse.holders--; };
+}
+
+/** Start `update` unless Codex is in use or already updating. */
+export function updateWhenIdle<T>(update: () => Promise<T>): Promise<T | undefined> {
+  if (codexUse.holders || codexUse.update) return Promise.resolve(undefined);
+  const running = update();
+  const done = () => { codexUse.update = undefined; };
+  codexUse.update = Promise.race([running, new Promise((r) => setTimeout(r, 600_000).unref())]).then(done, done);
+  return running;
+}
+
 /** Codex's documented JSONL mode supplies session, progress, tool, and final
  * message events while auth stays entirely inside the local Codex CLI. */
-export async function* streamCodexAgent(
-  req: AgentRequest
-): AsyncGenerator<AgentEvent> {
-  if (req.signal.aborted) { yield { type: "error", message: "Agent stopped" }; return; }
+export async function* streamCodexAgent(req: AgentRequest): AsyncGenerator<AgentEvent> {
+  const release = await holdCodex();
+  try {
+    if (req.signal.aborted) { yield { type: "error", message: "Agent stopped" }; return; }
+    yield* runCodex(req);
+  } finally { release(); }
+}
+
+async function* runCodex(req: AgentRequest): AsyncGenerator<AgentEvent> {
   const cli = await createCliSession(req, {
     label: "Codex",
     executable: process.env.AUTOPROJECT_CODEX_PATH?.trim() || "codex",

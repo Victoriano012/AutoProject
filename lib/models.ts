@@ -91,8 +91,10 @@ export const MODEL_CHOICES: readonly ModelChoice[] = BUNDLED.map(normalizeChoice
 
 /** Pure catalog helpers are shared by Settings and the server integrations. */
 export function modelChoice(model: string, catalog: readonly ModelChoice[] = MODEL_CHOICES): ModelChoice | undefined {
-  return catalog.find((choice) => choice.value === model)
-    ?? catalog.find((choice) => Object.values(choice.reasoningModels ?? {}).includes(model))
+  // An entry that groups this ID as one of its levels outranks a standalone
+  // entry for it, which older parsers stored and old caches may still hold.
+  return catalog.find((choice) => Object.values(choice.reasoningModels ?? {}).includes(model))
+    ?? catalog.find((choice) => choice.value === model)
     ?? (model.startsWith("gemini-") && !/-(low|medium|high)$/.test(model)
       ? catalog.find((choice) => choice.value === `${model.replace(/-(low|medium|high)$/, "")}-high`)
       : undefined);
@@ -123,19 +125,41 @@ export function newer(a: string, b: string): boolean {
   return false;
 }
 
+/** Family and version as the "one version per name" rule reads a label: case
+ * blind, without the vendor word or a date or build stamp ("-1029",
+ * "-20251001"), and with the version taken from wherever it sits ("GPT-6.1-Sol",
+ * "claude-haiku-4-5"). Undefined when there is no version to order by. */
+function familyVersion(label: string): { family: string; version: string } | undefined {
+  const words = normalizeModelLabel(label).toLowerCase().replace(/\b\d{4}-\d\d-\d\d\b/g, " ")
+    .split(/[\s_-]+/).filter((word) => word && !/^(\d{4,}|0\d+)$/.test(word));
+  if (VENDORS.has(words[0])) words.shift();
+  const at = words.findIndex((word) => VERSION_WORD.test(word));
+  if (at < 0) return;
+  let end = at + 1;
+  while (end < words.length && VERSION_WORD.test(words[end])) end++;
+  return { family: [...words.slice(0, at), ...words.slice(end)].join(" "), version: words.slice(at, end).join(".") };
+}
+
 /** The tools list every release they still accept; offer only the newest of
- * each family. Labels are already "family version" (Opus 5.5, Sol 6.1) whatever
- * shape each provider gives its IDs, so they are where every provider agrees on
- * what a family and a version are. A label with no version is its own family. */
+ * each family. Labels are where every provider agrees on what a family and a
+ * version are, whatever shape it gives its IDs. A label with no version is its
+ * own family. */
 export function latestPerFamily(models: readonly ModelChoice[]): ModelChoice[] {
   const latest = new Map<string, { model: ModelChoice; version: string }>();
   for (const model of models) {
-    const [, family, version] = /^(.+) (\d+(?:\.\d+)*)$/.exec(model.label) ?? [, `\0${model.value}`, ""];
+    const { family, version } = familyVersion(model.label) ?? { family: `\0${model.value}`, version: "" };
     const key = `${model.provider}\0${family}`;
     const best = latest.get(key);
     if (!best || newer(version, best.version)) latest.set(key, { model, version });
   }
   return [...latest.values()].map(({ model }) => model);
+}
+
+/** What Settings offers, from discovery or the bundled fallback alike. Gemini
+ * Flash, in every variant, is left out at the person's request; a saved one
+ * still runs. */
+export function offeredModels(models: readonly ModelChoice[]): ModelChoice[] {
+  return latestPerFamily(models).filter((m) => !(m.provider === "gemini" && /\bflash\b/i.test(`${m.label} ${m.value}`)));
 }
 
 /** Claude's CLI aliases carry no provider prefix, so a saved `opus` would fall
